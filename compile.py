@@ -22,7 +22,9 @@ def main():
 
     print(f"Running command:\n{cmd}")
 
-    subprocess.run(cmd, shell=True)
+    builder_exit_code = subprocess.run(cmd, shell=True).returncode
+    if builder_exit_code != 0:
+        exit(builder_exit_code)
 
 if __name__=="__main__":
     main()
