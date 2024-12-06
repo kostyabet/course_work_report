@@ -6,19 +6,26 @@ import sysconfig
 
 DOCKER_IMAGE = "ghcr.io/fcsan-bsuir/bsuir_tex:main"
 
+
 def main():
     system = platform.system()
+
+    os.remove("src/report.pdf")
 
     compile_cmd = "make -j4 -C 'src' all"
 
     clean_cmd = "make -C 'src' clean"
-    
-    docker_platform_flag = '--platform linux/amd64' if sysconfig.get_platform().split("-")[-1].lower() == 'arm64' else ''
+
+    docker_platform_flag = (
+        "--platform linux/amd64"
+        if sysconfig.get_platform().split("-")[-1].lower() == "arm64"
+        else ""
+    )
     run_docker_cmd = f'docker run {docker_platform_flag} -i --rm -v "{os.getcwd()}:/test" -w /test {DOCKER_IMAGE} sh -c'
 
     shell_and_symbol = ";" if system == "Windows" else "&&"
 
-    cmd = " ".join([run_docker_cmd, "\"", compile_cmd, "&&" , clean_cmd, "\""])
+    cmd = " ".join([run_docker_cmd, '"', compile_cmd, "&&", clean_cmd, '"'])
 
     print(f"Running command:\n{cmd}")
 
@@ -26,5 +33,6 @@ def main():
     if builder_exit_code != 0:
         exit(builder_exit_code)
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
