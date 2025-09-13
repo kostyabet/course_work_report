@@ -1,0 +1,737 @@
+\textbf{Services}
+\begin{lstlisting}[style=CodeListing]
+export const setupInterceptors = (logout) => {
+  httpClient.interceptors.response.use(
+    (config) => config,
+      async (error) => {
+        const originalRequest = error.config;
+        if (
+          error.response?.status === 403 &&
+          error.config &&
+          !error.config._isRetry
+        ) {
+          try {
+            if (isRefreshing) {
+              return new Promise((resolve, reject) => {
+                failedQueue.push({ reject, resolve });
+              })
+                .then((token) => {
+                  originalRequest.headers.Authorization = `Bearer ${token}`;
+                  return axios(originalRequest);
+                })
+                .catch((err) => Promise.reject(err));
+            }
+              originalRequest._isRetry = true;
+              isRefreshing = true;
+              const refreshTokenStorage = localStorage.getItem('refreshToken');
+              return new Promise((resolve, reject) => {
+                axios
+                  .post(`${API_URL}/auth/refresh`, {
+                    token: refreshTokenStorage,
+                  })
+                  .then(({ data }) => {
+                      window.localStorage.setItem('accessToken', data.accessToken);
+                      window.localStorage.setItem('refreshToken', data.refreshToken);
+                      httpClient.defaults.headers.common.Authorization = `Bearer ${data.accessToken}`;
+                      originalRequest.headers.Authorization = `Bearer ${data.accessToken}`;
+                      processQueue(null, data.accessToken);
+                      resolve(httpClient(originalRequest));
+                    })
+                    .catch((err) => {
+                      processQueue(err, null);
+                      logout();
+                      reject(err);
+                    })
+                    .finally(() => {
+                      isRefreshing = false;
+                    });
+              });
+            } catch (e) {
+              console.error('Token expired', e);
+              logout(); // fallback logout
+            }
+          }
+          throw error;
+    }
+  );
+  httpClient.interceptors.request.use((config) => {
+    const token = localStorage.getItem('accessToken');
+    config.headers.Authorization = token ? `Bearer ${token}` : '';
+    return config;
+  });
+};
+
+const generateToken = (user) => {
+  try {
+    const secret = { id: user.id, login: user.login };
+    const accessToken = jwt.sign(
+      secret,
+      accessTokenSecret,
+      { expiresIn: '15m' }
+    );
+
+    const refreshToken = jwt.sign(
+      secret,
+      refreshTokenSecret,
+      { expiresIn: '30m' }
+    );
+    
+    info('Сгенерированы новые токены.');
+    return { accessToken, refreshToken };
+  }
+  catch (error) {
+    throw new Error('Ошибка генерации токена: ' + error.message);
+  }
+};
+
+exports.register = async (req, res) => {
+  try {
+    const { login, password, firstName, lastName, phone, email, role } = req.body;
+
+    if (!login || !password || !firstName || !lastName || !phone || !email) {
+      warn('Пожалуйста, заполните все обязательные поля.');
+      return res.status(400).json({ message: 'Пожалуйста, заполните все обязательные поля.' });
+    }
+    
+    const existing = await User.findOne({ where: { login } });
+
+    if (existing) {
+      warn(`Пользователь с таким login: ${login} уже существует.`);
+      return res.status(400).json({ message: `Пользователь с таким login: ${login} уже существует.` });
+    }
+    
+    const avatarPath = req?.file
+      ? req?.file?.path || null
+      : null;
+    const hash_password = await bcrypt.hash(password, 10);
+    const user = await User.create({
+      login,
+      password: hash_password,
+      firstName,
+      lastName,
+      phone,
+      email,
+      role,
+      photoURL: avatarPath,
+    });
+
+    info('Пользователь успешно зарегистрирован!', { user: user.id });
+    res.status(201).json({
+      message: 'Пользователь создан',
+      user: {
+        id: user.id,
+        login: user.login,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        avatar: user.photoURL,
+      }
+    });
+  } catch (error) {
+    console.error('Ошибка регистрации:', error);
+    errlog(`Ошибка регистрации: ${error.message}`);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+}
+
+exports.login = async (req, res) => {
+  try {
+    const { login, pass: password } = req.body;
+
+    if (!login || !password) {
+      warn('Пожалуйста, заполните все обязательные поля.');
+      return res.status(400).json({ message: 'Пожалуйста, заполните все обязательные поля.' });
+    }
+
+    const user = await User.findOne({ where: { login } });
+    if (!user) {
+      warn(`Пользователь с login: ${login} не найден.`);
+      return res.status(401).json({ message: `Пользователь с login: ${login} не найден.` });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      warn(`Неверный пароль для пользователя с login: ${login}`);
+      return res.status(401).json({ message: 'Неверный пароль' });
+    }
+
+    const { accessToken, refreshToken } = generateToken(user);
+
+    const userData = user.get({ plain: true });
+    if (!userData) {
+      return new Error({ message: 'Ошибка получения данных' });
+    }
+    delete userData.password;
+
+    info('Пользователь успешно вошёл в систему!', { user: userData.id });
+    res.status(200).json({
+      message: 'Успешный вход',
+      user: userData,
+      accessToken,
+      refreshToken,
+    });
+  } catch (error) {
+    console.error('Ошибка входа:', error);
+    errlog(`Ошибка входа: ${error.message}`);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+}
+
+exports.refreshToken = async (req, res) => {
+  const { token: refreshToken } = req.body;
+
+  if (!refreshToken) {
+    warn('Refresh токен отсутствует');
+    return res.status(401).json({ message: 'Refresh токен отсутствует' });
+  }
+
+  try {
+    const decoded = jwt.verify(refreshToken, refreshTokenSecret);
+
+    const { accessToken: newAccessToken, refreshToken: newRefreshToken } = generateToken({
+      id: decoded?.id,
+      login: decoded?.login
+    });
+
+    info('Refresh токен успешно обновлён');
+    res.status(200).json({
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken
+    });
+  } catch (error) {
+    console.error('Ошибка обновления токена:', error);
+    errlog(`Ошибка обновления токена. ${error}`);
+    return res.status(403).json({ message: 'Неверный или просроченный refresh токен' });
+  }
+}
+
+async function log(level, message, extra = {}) {
+  if (!isConnected) {
+    await producer.connect();
+    isConnected = true;
+  }
+
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    service: 'auth-service',
+    level,
+    message,
+    ...extra,
+  };
+
+  await producer.send({
+    topic: 'logs',
+    messages: [{ value: JSON.stringify(logEntry) }],
+  });
+}
+
+function info(msg, extra) {
+  return log('INFO', msg, extra);
+}
+
+function error(msg, extra) {
+  return log('ERROR', msg, extra);
+}
+
+function warn(msg, extra) {
+  return log('WARN', msg, extra);
+}
+
+function debug(msg, extra) {
+  return log('DEBUG', msg, extra);
+}
+
+async function run() {
+  await consumer.connect();
+  await producer.connect();
+  await consumer.subscribe({ topic: 'check-users' });
+
+  await consumer.run({
+    eachMessage: async ({ message }) => {
+      const { users, correlationId } = JSON.parse(message.value.toString());
+
+      const { exists } = await checkUsersExists(users);
+
+      if (!exists) {
+        warn(`User(s) ${users} do not exist`);
+      }
+
+      await producer.send({
+        topic: 'check-users-response',
+        messages: [
+          {
+            key: correlationId,
+            value: JSON.stringify({ users, exists, correlationId })
+          }
+        ]
+      });
+    }
+  });
+}
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader?.split(' ')[1];
+
+  if (!token) {
+    warn('Токен отсутствует');
+    return res.status(401).json({ message: 'Токен отсутствует' });
+  }
+
+  jwt.verify(token, accessTokenSecret, (err, decoded) => {
+    if (err) {
+      warn('Недействительный токен');
+      return res.status(403).json({ message: 'Недействительный токен' });
+    }
+
+    debug('Токен действителен');
+    req.user = decoded;
+    next();
+  });
+};
+
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'avatars',
+    allowed_formats: ['jpg', 'png', 'jpeg'],
+  },
+});
+
+const upload = multer({ storage });
+
+exports.create = async (req, res) => {
+  try {
+    const { name, description, startAt, endAt, priority, state } = req.body;
+    const attachments = req.files?.map(file => file.path) || null;
+
+    if (!name || !startAt || !endAt || !priority || !state) {
+      warn('Не все обязательные поля заполнены.');
+      return res.status(400).json({ message: 'Не все обязательные поля заполнены.' });
+    }
+
+    // Date check
+    const start = new Date(startAt);
+    const end = new Date(endAt);
+    if (isNaN(start) || isNaN(end)) {
+      warn('Неверный формат даты.');
+      return res.status(400).json({ message: 'Неверный формат даты.' });
+    }
+    if (start >= end) {
+      warn('Дата начала должна быть раньше даты окончания.');
+      return res.status(400).json({ message: 'Дата начала должна быть раньше даты окончания.' });
+    }
+        
+    // Users check
+    const users = Array.isArray(req.body.users)
+      ? req.body.users
+      : [req.body.users];
+
+    if (!users || users.length === 0) {
+      warn('Пользователи не указаны.');
+      return res.status(400).json({ message: 'Пользователи не указаны.' });
+    }
+
+    const correlationId = uuidv4();
+    const responsePromise = createResponseWaiter(correlationId);
+    await checkUsers(users, correlationId);
+
+    const response = await responsePromise;
+    const { exists } = response;
+
+    const task = await Task.create({
+      name,
+      description,
+      users: !exists || exists.length === 0 ? null : exists,
+      attachments,
+      startAt,
+      endAt,
+      priority,
+      state
+    });
+  
+    info('Задача создана', { taskId: task.id })
+    res.status(201).json({
+      message: 'Задача создана',
+      task: task
+    });
+  } catch(error) {
+    console.error('Ошибка создания задания:', error);
+    errlog(`Ошибка создания задания. ${error}`);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+}
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Favicon -->
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="/favicon/apple-touch-icon.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="32x32"
+      href="/favicon/favicon-32x32.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="16x16"
+      href="/favicon/favicon-16x16.png"
+    />
+    <meta name="theme-color" content="#000000" />
+    <link rel="manifest" href="./manifest.json" />
+    <!-- Using Google Font -->
+    <link rel="preconnect" href="https://fonts.gstatic.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <meta 
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>CRM system</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="/env-config.js"></script>
+    <script type="module" src="/src/application/root.jsx"></script>
+  </body>
+</html>
+
+export const fetchUserInfo = async () => {
+  const response = await httpClient.get('/auth/me');
+  return response.data;
+};
+
+export const fetchUpdateUser = async (userData) => {
+  const response = await httpClient.put('/auth/me', userData);
+  return response.data;
+}
+
+export const fetchUsersList = async () => {
+  const response = await httpClient.get('/auth/getAllUsers');
+  return response.data;
+}
+
+export const fetchUserInfoById = async (id) => {
+  const response = await httpClient.get(`/auth/getUser/${id}`);
+  return response.data;
+}
+\end{lstlisting}
+
+\textbf{Server settings}
+\begin{lstlisting}[style=CodeListing]
+const app = express();
+app.use(bodyParser.json());
+app.use(cors({
+  origin: function(origin, callback) {
+    // Разрешаем доступ для localhost и IP-адресов в диапазоне 192.168.*
+    if (!origin || 
+        /^http:\/\/localhost(:\d+)?$/.test(origin) || 
+        /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin)) {
+      callback(null, true);  // Разрешаем запросы
+    } else {
+      callback(new Error('Not allowed by CORS'));  // Отказываем всем остальным
+    }
+  },
+  credentials: true
+}));
+\end{lstlisting}
+
+\textbf{Logstash.conf}
+\begin{lstlisting}[style=CodeListing]
+  input {
+  kafka {
+    bootstrap_servers => "kafka:9092"
+    topics => ["logs"]
+    group_id => "logstash"
+  }
+}
+
+filter {
+  json {
+    source => "message"
+  }
+
+  mutate {
+    add_field => {
+      "message" => "%{[message]}"
+      "service" => "%{[service]}"
+      "level" => "%{[level]}"
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://elasticsearch:9200"]
+    data_stream => "true"
+    data_stream_type => "logs"
+    data_stream_dataset => "all"
+    data_stream_namespace => "prod"
+  }
+}
+\end{lstlisting}
+
+\textbf{Docker-compose}
+\begin{lstlisting}[style=CodeListing]
+services:
+  logstash:
+    depends_on:
+      - elasticsearch
+      - kafka
+    container_name: logstash
+    image: docker.elastic.co/logstash/logstash:8.5.3
+    networks:
+      - app-net
+    environment:
+      - "LOGSTASH_HTTP_HOST=0.0.0.0"
+    ports:
+      - "5044:5044"
+    volumes:
+      - ./logstash/pipeline/logstash-prod.conf:/usr/share/logstash/pipeline/logstash.conf
+
+  elasticsearch:
+    container_name: elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.5.3
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ELASTIC_PASSWORD=admin
+    networks:
+      - app-net
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  kibana:
+    container_name: kibana
+    image: docker.elastic.co/kibana/kibana:8.5.3
+    networks:
+      - app-net
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    volumes:
+      - kibana_config:/usr/share/kibana/config
+
+  zookeeper:
+    container_name: zookeeper
+    image: confluentinc/cp-zookeeper:latest
+    networks:
+      - app-net
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    image: confluentinc/cp-kafka:latest
+    ports:
+      - "9092:9092"
+    networks:
+      - app-net
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  gateway:
+    image: nginx:latest
+    container_name: gateway
+    ports:
+      - "80:80"
+    networks:
+      - app-net
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - frontend
+      - auth-service
+      - tasks-service
+      - log-service
+
+  db:
+    image: postgres:14
+    container_name: postgres-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    networks:
+      - app-net
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  log-service:
+    image: kostyabet228/crm-system:log_service-latest
+    container_name: log-service
+    networks:
+      - app-net
+    expose:
+      - "5002"
+    depends_on:
+      db:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    environment:
+      ACCESSTOKENSECRET: ${ACCESSTOKENSECRET}
+      REFRESHTOKENSECRET: ${REFRESHTOKENSECRET}
+      KAFKA_BROKER: kafka:9092
+
+  auth-service:
+    image: kostyabet228/crm-system:auth_service-latest
+    container_name: auth-service
+    networks:
+      - app-net
+    expose:
+      - "5000"
+    depends_on:
+      db:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    environment:
+      ACCESSTOKENSECRET: ${ACCESSTOKENSECRET}
+      REFRESHTOKENSECRET: ${REFRESHTOKENSECRET}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
+      KAFKA_BROKER: kafka:9092
+
+  tasks-service:
+    image: kostyabet228/crm-system:tasks_service-latest
+    container_name: tasks-service
+    networks:
+      - app-net
+    expose:
+      - "5001"
+    depends_on:
+      db:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    environment:
+      ACCESSTOKENSECRET: ${ACCESSTOKENSECRET}
+      REFRESHTOKENSECRET: ${REFRESHTOKENSECRET}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      GATEWAY_URL: http:/gateway:80
+      KAFKA_BROKER: kafka:9092
+
+  frontend:
+    image: kostyabet228/crm-system:frontend-latest
+    container_name: frontend
+    networks:
+      - app-net
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_LOCAL: http:/gateway:80
+
+networks:
+  app-net:
+    driver: bridge
+
+volumes:
+  kibana_config:
+  es_data:
+  postgres-data: {}
+
+\end{lstlisting}
+
+\textbf{Nginx.conf}
+\begin{lstlisting}[style=CodeListing]
+events {}
+
+http {
+  upstream auth {
+    server auth-service:5000;
+  }
+
+  upstream tasks {
+    server tasks-service:5001;
+  }
+
+  upstream log {
+    server log-service:5002;
+  }
+
+  server {
+    listen 80;
+
+    location ~ ^/(tasks|tasks/|priority|priority/|state|state/) {
+      proxy_pass http://tasks;
+      proxy_redirect off;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location ~ ^/(auth|uploads/avatars)/ {
+      proxy_pass http://auth;
+      proxy_redirect off;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location ~ ^/(log|log/) {
+      proxy_pass http://log;
+      proxy_redirect off;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+  }
+}
+\end{lstlisting}
