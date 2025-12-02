@@ -1,0 +1,41 @@
+\subsection{Ошибка сборки из-за неправильных флагов компилятора}
+
+При попытке собрать Release версию проекта возникла ошибка компиляции.
+В файле \texttt{CMakeLists.txt} были указаны флаги оптимизации для компилятора
+MSVC (\texttt{/O2}, \texttt{/DNDEBUG}), но проект собирался с помощью компилятора
+GCC/MinGW, который использует другой синтаксис флагов.
+
+Рассмотреть ошибку можно ниже.
+
+\begin{lstlisting}[style=CodeListing]
+c++.exe: warning: /O2: linker input file unused because linking not done
+c++.exe: error: /O2: linker input file not found: No such file or directory
+c++.exe: warning: /DNDEBUG: linker input file unused because linking not done
+c++.exe: error: /DNDEBUG: linker input file not found: No such file or directory
+\end{lstlisting}
+
+Для решения проблемы было необходимо добавить проверку типа компилятора в
+\texttt{CMakeLists.txt} и применять соответствующие флаги в зависимости от
+используемого компилятора. Для MSVC используются флаги \texttt{/O2} и \texttt{/DNDEBUG}, а
+для GCC/MinGW - флаги \texttt{-O2}, \texttt{-DNDEBUG} и \texttt{-s} (для удаления символов).
+
+\begin{lstlisting}[style=CodeListing]
+# Release build optimizations
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    if(MSVC)
+        # MSVC compiler flags
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /OPT:REF /OPT:ICF")
+    else()
+        # GCC/MinGW compiler flags
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -DNDEBUG")
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -s")
+    endif()
+endif()
+\end{lstlisting}
+
+После внесения изменений в \texttt{CMakeLists.txt} Release версия проекта успешно собирается
+как с компилятором MSVC, так и с GCC/MinGW. Флаги оптимизации применяются корректно
+в зависимости от используемого компилятора, что обеспечивает оптимальный размер и
+производительность исполняемого файла. Проект теперь может быть собран в Release
+режиме на различных системах сборки без ошибок компиляции.

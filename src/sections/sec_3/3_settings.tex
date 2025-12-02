@@ -1,0 +1,114 @@
+\subsection{Изменение настроек}
+
+К функционалу изменения настроек программного средства можно отнести следующие компоненты:
+
+\begin{itemize}
+    \item получение настроек;
+    \item изменение настроек;
+\end{itemize}
+
+\subsubsection{Получение настроек}
+
+Получение настроек начинается с открытия ключа реестра Windows, в котором хранятся сохранённые параметры конфигурации приложения.
+
+После успешного открытия ключа реестра функция последовательно читает три параметра: тему оформления, размер шрифта и имя шрифта. Для каждого параметра выполняется проверка успешности чтения и валидация значения.
+
+При чтении темы оформления проверяется, что значение находится в допустимом диапазоне (от System до Dark), и если значение валидно, оно устанавливается в глобальную переменную.
+
+При чтении размера шрифта проверяется, что значение находится в диапазоне от 8 до 72 пунктов, и если значение валидно, оно устанавливается в глобальную переменную.
+
+При чтении имени шрифта проверяется успешность чтения строкового значения, и если чтение успешно, имя шрифта устанавливается в глобальную переменную.
+
+После обработки всех параметров ключ реестра закрывается, и вызывается функция UpdateThemeColors для применения загруженных настроек темы к цветовой схеме интерфейса.
+
+Если в процессе работы алгоритма произошла ошибка (например, ключ реестра не существует, доступ запрещён или значение невалидно), функция использует значения по умолчанию (тема System, размер шрифта 12, имя шрифта "Segoe UI") и продолжает работу.
+
+\begin{lstlisting}[style=CodeListing]
+void Load() {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\KursWork\\FileManager", 
+                      0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+        DWORD theme = (DWORD)ThemeChoice::System; 
+        DWORD sz = sizeof(theme);
+        if (RegGetValueW(hKey, nullptr, L"Theme", RRF_RT_REG_DWORD, 
+                        nullptr, &theme, &sz) == ERROR_SUCCESS) {
+            if (theme <= (DWORD)ThemeChoice::Dark) {
+                g_themeChoice = (ThemeChoice)theme;
+            }
+        }
+        DWORD size = 12; 
+        sz = sizeof(size);
+        if (RegGetValueW(hKey, nullptr, L"FontSize", RRF_RT_REG_DWORD, 
+                        nullptr, &size, &sz) == ERROR_SUCCESS) {
+            if (size >= 8 && size <= 72) {
+                g_fontPt = (int)size;
+            }
+        }
+        wchar_t buf[128]; 
+        DWORD bytes = sizeof(buf);
+        if (RegGetValueW(hKey, nullptr, L"FontFace", RRF_RT_REG_SZ, 
+                        nullptr, buf, &bytes) == ERROR_SUCCESS) {
+            g_fontFace = buf;
+        }
+        RegCloseKey(hKey);
+    }
+    UpdateThemeColors();
+}
+\end{lstlisting}
+
+\subsubsection{Изменение настроек}
+
+Изменение настроек начинается с обработки команды пользователя из меню приложения. В зависимости от выбранной команды определяется тип изменяемой настройки (тема, имя шрифта или размер шрифта).
+
+При изменении темы оформления проверяется идентификатор выбранной команды меню, и в зависимости от него устанавливается соответствующее значение темы (System, Light или Dark). После установки темы вызывается функция Save для сохранения изменений в реестр, и пользователю отображается сообщение о необходимости перезагрузки приложения.
+
+При изменении имени шрифта проверяется идентификатор выбранной команды меню, и в зависимости от него устанавливается соответствующее имя шрифта ("Segoe UI", "Consolas" или "Courier New"). После установки имени шрифта вызывается функция ApplyFontToControls для применения нового шрифта ко всем элементам интерфейса, обновляются отметки в меню, и вызывается функция Save для сохранения изменений.
+
+При изменении размера шрифта проверяется идентификатор выбранной команды меню или клавиатурной комбинации. Если это команда увеличения размера, проверяется, что новый размер не превышает 72 пункта, и размер увеличивается на 1. Если это команда уменьшения размера, проверяется, что новый размер не меньше 8 пунктов, и размер уменьшается на 1. После установки размера шрифта вызывается функция ApplyFontToControls для применения нового размера ко всем элементам интерфейса, обновляются отметки в меню, и вызывается функция Save для сохранения изменений.
+
+\begin{lstlisting}[style=CodeListing]
+case ID_MENU_THEME_SYSTEM:
+case ID_MENU_THEME_LIGHT:
+case ID_MENU_THEME_DARK: {
+    if (LOWORD(wParam) == ID_MENU_THEME_SYSTEM) {
+        Settings::SetTheme(ThemeChoice::System);
+    } else if (LOWORD(wParam) == ID_MENU_THEME_LIGHT) {
+        Settings::SetTheme(ThemeChoice::Light);
+    } else {
+        Settings::SetTheme(ThemeChoice::Dark);
+    }
+    Settings::Save();
+    return 0;
+}
+case ID_MENU_FONT_SEGOE:
+case ID_MENU_FONT_CONSOLAS:
+case ID_MENU_FONT_COURIER: {
+    if (LOWORD(wParam) == ID_MENU_FONT_SEGOE) {
+        Settings::SetFontFace(L"Segoe UI");
+    } else if (LOWORD(wParam) == ID_MENU_FONT_CONSOLAS) {
+        Settings::SetFontFace(L"Consolas");
+    } else {
+        Settings::SetFontFace(L"Courier New");
+    }
+    UI::ApplyFontToControls(hwnd, *controls);
+    UI::UpdateMenuChecks(hwnd);
+    Settings::Save();
+    return 0;
+}
+case ID_CMD_FONTSIZE_INC: {
+    Settings::SetFontSize(std::min(72, Settings::GetFontSize() + 1));
+    UI::ApplyFontToControls(hwnd, *controls);
+    UI::UpdateMenuChecks(hwnd);
+    Settings::Save();
+    return 0;
+}
+case ID_CMD_FONTSIZE_DEC: {
+    Settings::SetFontSize(std::max(8, Settings::GetFontSize() - 1));
+    UI::ApplyFontToControls(hwnd, *controls);
+    UI::UpdateMenuChecks(hwnd);
+    Settings::Save();
+    return 0;
+}
+\end{lstlisting}
+
+Если в процессе работы алгоритма произошла ошибка (например, не удалось сохранить настройки в реестр), изменения применяются только к текущей сессии приложения и не сохраняются для следующего запуска.

@@ -1,737 +1,2520 @@
-\textbf{Services}
+\textbf{File System}
 \begin{lstlisting}[style=CodeListing]
-export const setupInterceptors = (logout) => {
-  httpClient.interceptors.response.use(
-    (config) => config,
-      async (error) => {
-        const originalRequest = error.config;
-        if (
-          error.response?.status === 403 &&
-          error.config &&
-          !error.config._isRetry
-        ) {
-          try {
-            if (isRefreshing) {
-              return new Promise((resolve, reject) => {
-                failedQueue.push({ reject, resolve });
-              })
-                .then((token) => {
-                  originalRequest.headers.Authorization = `Bearer ${token}`;
-                  return axios(originalRequest);
-                })
-                .catch((err) => Promise.reject(err));
-            }
-              originalRequest._isRetry = true;
-              isRefreshing = true;
-              const refreshTokenStorage = localStorage.getItem('refreshToken');
-              return new Promise((resolve, reject) => {
-                axios
-                  .post(`${API_URL}/auth/refresh`, {
-                    token: refreshTokenStorage,
-                  })
-                  .then(({ data }) => {
-                      window.localStorage.setItem('accessToken', data.accessToken);
-                      window.localStorage.setItem('refreshToken', data.refreshToken);
-                      httpClient.defaults.headers.common.Authorization = `Bearer ${data.accessToken}`;
-                      originalRequest.headers.Authorization = `Bearer ${data.accessToken}`;
-                      processQueue(null, data.accessToken);
-                      resolve(httpClient(originalRequest));
-                    })
-                    .catch((err) => {
-                      processQueue(err, null);
-                      logout();
-                      reject(err);
-                    })
-                    .finally(() => {
-                      isRefreshing = false;
-                    });
-              });
-            } catch (e) {
-              console.error('Token expired', e);
-              logout(); // fallback logout
-            }
-          }
-          throw error;
-    }
-  );
-  httpClient.interceptors.request.use((config) => {
-    const token = localStorage.getItem('accessToken');
-    config.headers.Authorization = token ? `Bearer ${token}` : '';
-    return config;
-  });
-};
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
 
-const generateToken = (user) => {
-  try {
-    const secret = { id: user.id, login: user.login };
-    const accessToken = jwt.sign(
-      secret,
-      accessTokenSecret,
-      { expiresIn: '15m' }
-    );
+#include "../../include/filesystem.h"
+#include "../../include/utils.h"
+#include <windows.h>
+#include <commctrl.h>
+#include <shellapi.h>
+#include <algorithm>
 
-    const refreshToken = jwt.sign(
-      secret,
-      refreshTokenSecret,
-      { expiresIn: '30m' }
-    );
-    
-    info('Сгенерированы новые токены.');
-    return { accessToken, refreshToken };
-  }
-  catch (error) {
-    throw new Error('Ошибка генерации токена: ' + error.message);
-  }
-};
-
-exports.register = async (req, res) => {
-  try {
-    const { login, password, firstName, lastName, phone, email, role } = req.body;
-
-    if (!login || !password || !firstName || !lastName || !phone || !email) {
-      warn('Пожалуйста, заполните все обязательные поля.');
-      return res.status(400).json({ message: 'Пожалуйста, заполните все обязательные поля.' });
+namespace Filesystem {
+    bool HasSubdirs(const std::wstring &path) {
+        std::wstring pattern = Utils::JoinPath(path, L"*");
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        bool result = false;
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            result = true;
+            break;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        return result;
     }
     
-    const existing = await User.findOne({ where: { login } });
-
-    if (existing) {
-      warn(`Пользователь с таким login: ${login} уже существует.`);
-      return res.status(400).json({ message: `Пользователь с таким login: ${login} уже существует.` });
-    }
-    
-    const avatarPath = req?.file
-      ? req?.file?.path || null
-      : null;
-    const hash_password = await bcrypt.hash(password, 10);
-    const user = await User.create({
-      login,
-      password: hash_password,
-      firstName,
-      lastName,
-      phone,
-      email,
-      role,
-      photoURL: avatarPath,
-    });
-
-    info('Пользователь успешно зарегистрирован!', { user: user.id });
-    res.status(201).json({
-      message: 'Пользователь создан',
-      user: {
-        id: user.id,
-        login: user.login,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        avatar: user.photoURL,
-      }
-    });
-  } catch (error) {
-    console.error('Ошибка регистрации:', error);
-    errlog(`Ошибка регистрации: ${error.message}`);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
-}
-
-exports.login = async (req, res) => {
-  try {
-    const { login, pass: password } = req.body;
-
-    if (!login || !password) {
-      warn('Пожалуйста, заполните все обязательные поля.');
-      return res.status(400).json({ message: 'Пожалуйста, заполните все обязательные поля.' });
-    }
-
-    const user = await User.findOne({ where: { login } });
-    if (!user) {
-      warn(`Пользователь с login: ${login} не найден.`);
-      return res.status(401).json({ message: `Пользователь с login: ${login} не найден.` });
-    }
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      warn(`Неверный пароль для пользователя с login: ${login}`);
-      return res.status(401).json({ message: 'Неверный пароль' });
-    }
-
-    const { accessToken, refreshToken } = generateToken(user);
-
-    const userData = user.get({ plain: true });
-    if (!userData) {
-      return new Error({ message: 'Ошибка получения данных' });
-    }
-    delete userData.password;
-
-    info('Пользователь успешно вошёл в систему!', { user: userData.id });
-    res.status(200).json({
-      message: 'Успешный вход',
-      user: userData,
-      accessToken,
-      refreshToken,
-    });
-  } catch (error) {
-    console.error('Ошибка входа:', error);
-    errlog(`Ошибка входа: ${error.message}`);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
-}
-
-exports.refreshToken = async (req, res) => {
-  const { token: refreshToken } = req.body;
-
-  if (!refreshToken) {
-    warn('Refresh токен отсутствует');
-    return res.status(401).json({ message: 'Refresh токен отсутствует' });
-  }
-
-  try {
-    const decoded = jwt.verify(refreshToken, refreshTokenSecret);
-
-    const { accessToken: newAccessToken, refreshToken: newRefreshToken } = generateToken({
-      id: decoded?.id,
-      login: decoded?.login
-    });
-
-    info('Refresh токен успешно обновлён');
-    res.status(200).json({
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken
-    });
-  } catch (error) {
-    console.error('Ошибка обновления токена:', error);
-    errlog(`Ошибка обновления токена. ${error}`);
-    return res.status(403).json({ message: 'Неверный или просроченный refresh токен' });
-  }
-}
-
-async function log(level, message, extra = {}) {
-  if (!isConnected) {
-    await producer.connect();
-    isConnected = true;
-  }
-
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    service: 'auth-service',
-    level,
-    message,
-    ...extra,
-  };
-
-  await producer.send({
-    topic: 'logs',
-    messages: [{ value: JSON.stringify(logEntry) }],
-  });
-}
-
-function info(msg, extra) {
-  return log('INFO', msg, extra);
-}
-
-function error(msg, extra) {
-  return log('ERROR', msg, extra);
-}
-
-function warn(msg, extra) {
-  return log('WARN', msg, extra);
-}
-
-function debug(msg, extra) {
-  return log('DEBUG', msg, extra);
-}
-
-async function run() {
-  await consumer.connect();
-  await producer.connect();
-  await consumer.subscribe({ topic: 'check-users' });
-
-  await consumer.run({
-    eachMessage: async ({ message }) => {
-      const { users, correlationId } = JSON.parse(message.value.toString());
-
-      const { exists } = await checkUsersExists(users);
-
-      if (!exists) {
-        warn(`User(s) ${users} do not exist`);
-      }
-
-      await producer.send({
-        topic: 'check-users-response',
-        messages: [
-          {
-            key: correlationId,
-            value: JSON.stringify({ users, exists, correlationId })
-          }
-        ]
-      });
-    }
-  });
-}
-
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader?.split(' ')[1];
-
-  if (!token) {
-    warn('Токен отсутствует');
-    return res.status(401).json({ message: 'Токен отсутствует' });
-  }
-
-  jwt.verify(token, accessTokenSecret, (err, decoded) => {
-    if (err) {
-      warn('Недействительный токен');
-      return res.status(403).json({ message: 'Недействительный токен' });
-    }
-
-    debug('Токен действителен');
-    req.user = decoded;
-    next();
-  });
-};
-
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'avatars',
-    allowed_formats: ['jpg', 'png', 'jpeg'],
-  },
-});
-
-const upload = multer({ storage });
-
-exports.create = async (req, res) => {
-  try {
-    const { name, description, startAt, endAt, priority, state } = req.body;
-    const attachments = req.files?.map(file => file.path) || null;
-
-    if (!name || !startAt || !endAt || !priority || !state) {
-      warn('Не все обязательные поля заполнены.');
-      return res.status(400).json({ message: 'Не все обязательные поля заполнены.' });
-    }
-
-    // Date check
-    const start = new Date(startAt);
-    const end = new Date(endAt);
-    if (isNaN(start) || isNaN(end)) {
-      warn('Неверный формат даты.');
-      return res.status(400).json({ message: 'Неверный формат даты.' });
-    }
-    if (start >= end) {
-      warn('Дата начала должна быть раньше даты окончания.');
-      return res.status(400).json({ message: 'Дата начала должна быть раньше даты окончания.' });
-    }
+    void PopulateListForDirectory(HWND hList, const std::wstring &dirPath, 
+                                  std::vector<ListItem> &items, HWND hEmptyLabel) {
+        ListView_DeleteAllItems(hList);
+        items.clear();
         
-    // Users check
-    const users = Array.isArray(req.body.users)
-      ? req.body.users
-      : [req.body.users];
+        // Normalize path - resolve any symbolic links or short paths
+        std::wstring normalizedPath = dirPath;
+        wchar_t longPath[MAX_PATH + 1] = {0};
+        DWORD longPathLen = GetLongPathNameW(dirPath.c_str(), longPath, MAX_PATH);
+        if (longPathLen > 0 && longPathLen <= MAX_PATH) {
+            normalizedPath = longPath;
+        }
+        
+        // Ensure path ends with backslash for directories (except root like C:\)
+        if (normalizedPath.length() > 3 && normalizedPath.back() != L'\\') {
+            normalizedPath += L"\\";
+        }
+        
+        // Check if path exists - try original path first, then normalized
+        DWORD attribs = GetFileAttributesW(normalizedPath.c_str());
+        if (attribs == INVALID_FILE_ATTRIBUTES && normalizedPath != dirPath) {
+            // Try original path if normalized failed
+            attribs = GetFileAttributesW(dirPath.c_str());
+            if (attribs != INVALID_FILE_ATTRIBUTES) {
+                normalizedPath = dirPath;
+            }
+        }
+        
+        if (attribs == INVALID_FILE_ATTRIBUTES) {
+            // Path doesn't exist - check if it's a network path that might need time to connect
+            if (hEmptyLabel) {
+                // For network paths, show "Подключение..." instead of "Файл не найден"
+                bool isNetworkPath = (normalizedPath.length() >= 2 && normalizedPath[0] == L'\\' && normalizedPath[1] == L'\\');
+                if (isNetworkPath) {
+                    SetWindowTextW(hEmptyLabel, L"Подключение...");
+                } else {
+                    SetWindowTextW(hEmptyLabel, L"Файл не найден");
+                }
+                ShowWindow(hEmptyLabel, SW_SHOW);
+                SetWindowPos(hEmptyLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                InvalidateRect(hEmptyLabel, nullptr, TRUE);
+            }
+            // Hide list view to show only the message
+            ShowWindow(hList, SW_HIDE);
+            return;
+        }
+        
+        // Check if it's a directory
+        if (!(attribs & FILE_ATTRIBUTE_DIRECTORY)) {
+            // It's a file, not a directory - show "Файл пуст" message
+            if (hEmptyLabel) {
+                SetWindowTextW(hEmptyLabel, L"Файл пуст");
+                ShowWindow(hEmptyLabel, SW_SHOW);
+                SetWindowPos(hEmptyLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                InvalidateRect(hEmptyLabel, nullptr, TRUE);
+            }
+            // Hide list view to show only the message
+            ShowWindow(hList, SW_HIDE);
+            InvalidateRect(hList, nullptr, TRUE);
+            UpdateWindow(hList);
+            RedrawWindow(hList, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
+            return;
+        }
 
-    if (!users || users.length === 0) {
-      warn('Пользователи не указаны.');
-      return res.status(400).json({ message: 'Пользователи не указаны.' });
+        // Check if it's a network path - these may need time to load
+        bool isNetworkPath = (normalizedPath.length() >= 2 && normalizedPath[0] == L'\\' && normalizedPath[1] == L'\\');
+        
+        std::wstring pattern = Utils::JoinPath(normalizedPath, L"*");
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        
+        // If first attempt fails, show loading and retry after a delay
+        // This handles cases where directory is still loading (especially network paths and special folders)
+        if (h == INVALID_HANDLE_VALUE) {
+            DWORD error = GetLastError();
+            
+            // Show loading message while we retry
+            if (hEmptyLabel) {
+                SetWindowTextW(hEmptyLabel, L"Загрузка...");
+                ShowWindow(hEmptyLabel, SW_SHOW);
+                SetWindowPos(hEmptyLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                ShowWindow(hList, SW_HIDE);
+                InvalidateRect(hEmptyLabel, nullptr, TRUE);
+                UpdateWindow(hList);
+            }
+            
+            // Retry after delay - network paths need more time, local paths also need time for special folders
+            // Special folders like Downloads might need time to initialize
+            int delay = isNetworkPath ? 1500 : 800; // 1.5 seconds for network, 800ms for local (handles special folders)
+            
+            // Use a simple delay that doesn't block too much
+            // But we need to process messages to keep UI responsive
+            DWORD startTime = GetTickCount();
+            while ((GetTickCount() - startTime) < delay) {
+                // Process a few messages to keep UI responsive
+                MSG msg;
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                    if ((GetTickCount() - startTime) >= delay) break;
+                }
+                if ((GetTickCount() - startTime) < delay) {
+                    Sleep(50); // Small sleep to avoid busy waiting
+                }
+            }
+            
+            // Try again
+            h = FindFirstFileW(pattern.c_str(), &fd);
+        }
+        
+        if (h == INVALID_HANDLE_VALUE) {
+            // Directory is inaccessible or empty after retry
+            DWORD error = GetLastError();
+            if (hEmptyLabel) {
+                if (error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION) {
+                    SetWindowTextW(hEmptyLabel, L"Доступ запрещён");
+                } else if (isNetworkPath) {
+                    // For network paths, even after retry, show loading - they might still be connecting
+                    SetWindowTextW(hEmptyLabel, L"Загрузка...");
+                } else if (error == ERROR_FILE_NOT_FOUND || error == ERROR_NO_MORE_FILES) {
+                    // For local paths after retry, if still empty, show empty message
+                    SetWindowTextW(hEmptyLabel, L"Здесь пусто");
+                } else {
+                    // Other local errors - assume empty
+                    SetWindowTextW(hEmptyLabel, L"Здесь пусто");
+                }
+                ShowWindow(hEmptyLabel, SW_SHOW);
+                SetWindowPos(hEmptyLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                InvalidateRect(hEmptyLabel, nullptr, TRUE);
+            }
+            // Hide list view to show only the message
+            ShowWindow(hList, SW_HIDE);
+            InvalidateRect(hList, nullptr, TRUE);
+            UpdateWindow(hList);
+            RedrawWindow(hList, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
+            return;
+        }
+        
+        int idx = 0;
+        do {
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            bool isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            ListItem ri{ name, Utils::JoinPath(normalizedPath, name), isDir };
+            items.push_back(ri);
+
+            LVITEMW item{};
+            SHFILEINFOW sfi{};
+            UINT attrs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+            SHGetFileInfoW(ri.fullPath.c_str(), attrs, &sfi, sizeof(sfi), 
+                          SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES | SHGFI_SMALLICON);
+
+            item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+            item.iItem = idx;
+            item.pszText = const_cast<wchar_t*>(name.c_str());
+            item.lParam = static_cast<LPARAM>(idx);
+            item.iImage = sfi.iIcon;
+            ListView_InsertItem(hList, &item);
+
+            std::wstring typeText = isDir ? L"Dir" : L"File";
+            ListView_SetItemText(hList, idx, 1, const_cast<wchar_t*>(typeText.c_str()));
+
+            std::wstring mod = Utils::FileTimeToWString(fd.ftLastWriteTime);
+            ListView_SetItemText(hList, idx, 2, const_cast<wchar_t*>(mod.c_str()));
+            ++idx;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        
+        if (hEmptyLabel) {
+            if (items.empty()) {
+                // Directory is empty - show message and hide list view
+                SetWindowTextW(hEmptyLabel, L"Здесь пусто");
+                ShowWindow(hEmptyLabel, SW_SHOW);
+                SetWindowPos(hEmptyLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                InvalidateRect(hEmptyLabel, nullptr, TRUE);
+                // Hide list view to show only the message
+                ShowWindow(hList, SW_HIDE);
+            } else {
+                // Directory has items - show list view and hide message
+                ShowWindow(hEmptyLabel, SW_HIDE);
+                ShowWindow(hList, SW_SHOW);
+            }
+        } else {
+            // If no empty label, always show list view
+            ShowWindow(hList, SW_SHOW);
+        }
+        
+        InvalidateRect(hList, nullptr, TRUE);
+        UpdateWindow(hList);
+        RedrawWindow(hList, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
     }
+    
+    HTREEITEM InsertTreeItem(HWND hTree, HTREEITEM hParent, 
+                             const std::wstring &text, const std::wstring &fullPath, 
+                             bool placeholderChild) {
+        TVINSERTSTRUCTW ins{};
+        ins.hParent = hParent;
+        ins.hInsertAfter = TVI_LAST;
+        ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        ins.item.pszText = const_cast<wchar_t*>(text.c_str());
+        NodeData *data = new NodeData{fullPath, false};
+        ins.item.lParam = reinterpret_cast<LPARAM>(data);
+        HTREEITEM hItem = TreeView_InsertItem(hTree, &ins);
+        if (placeholderChild) {
+            TVINSERTSTRUCTW child{};
+            child.hParent = hItem;
+            child.hInsertAfter = TVI_LAST;
+            child.item.mask = TVIF_TEXT;
+            child.item.pszText = const_cast<wchar_t*>(L"...");
+            TreeView_InsertItem(hTree, &child);
+        }
+        return hItem;
+    }
+    
+    void ExpandTreeItem(HWND hTree, HTREEITEM hItem) {
+        // Remove placeholder children
+        HTREEITEM hChild = TreeView_GetChild(hTree, hItem);
+        while (hChild) {
+            TVITEMW tvi{}; tvi.mask = TVIF_TEXT; tvi.hItem = hChild;
+            wchar_t buf[8]; tvi.pszText = buf; tvi.cchTextMax = 8;
+            TreeView_GetItem(hTree, &tvi);
+            if (wcscmp(buf, L"...") == 0) {
+                TreeView_DeleteItem(hTree, hChild);
+                break;
+            }
+            hChild = TreeView_GetNextSibling(hTree, hChild);
+        }
 
-    const correlationId = uuidv4();
-    const responsePromise = createResponseWaiter(correlationId);
-    await checkUsers(users, correlationId);
+        TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem; TreeView_GetItem(hTree, &tvi);
+        NodeData *data = reinterpret_cast<NodeData*>(tvi.lParam);
+        if (!data || data->expanded) return;
 
-    const response = await responsePromise;
-    const { exists } = response;
+        std::wstring pattern = Utils::JoinPath(data->path, L"*");
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            std::wstring full = Utils::JoinPath(data->path, name);
+            bool hasChildren = HasSubdirs(full);
+            InsertTreeItem(hTree, hItem, name, full, hasChildren);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        data->expanded = true;
+    }
+    
+    void FreeNodeDataRecursive(HWND hTree, HTREEITEM hItem) {
+        while (hItem) {
+            HTREEITEM child = TreeView_GetChild(hTree, hItem);
+            if (child) FreeNodeDataRecursive(hTree, child);
+            TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem; TreeView_GetItem(hTree, &tvi);
+            if (tvi.lParam) delete reinterpret_cast<NodeData*>(tvi.lParam);
+            hItem = TreeView_GetNextSibling(hTree, hItem);
+        }
+    }
+    
+    HTREEITEM EnsurePathInTree(HWND hTree, const std::wstring &fullPath) {
+        if (fullPath.size() < 3 || fullPath[1] != L':') return nullptr;
+        
+        HTREEITEM hItem = TreeView_GetRoot(hTree);
+        HTREEITEM driveItem = nullptr;
+        while (hItem) {
+            TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem; TreeView_GetItem(hTree, &tvi);
+            NodeData *data = reinterpret_cast<NodeData*>(tvi.lParam);
+            if (data && _wcsicmp(data->path.c_str(), std::wstring(fullPath.substr(0,3)).c_str()) == 0) {
+                driveItem = hItem; break;
+            }
+            hItem = TreeView_GetNextSibling(hTree, hItem);
+        }
+        if (!driveItem) return nullptr;
 
-    const task = await Task.create({
-      name,
-      description,
-      users: !exists || exists.length === 0 ? null : exists,
-      attachments,
-      startAt,
-      endAt,
-      priority,
-      state
-    });
-  
-    info('Задача создана', { taskId: task.id })
-    res.status(201).json({
-      message: 'Задача создана',
-      task: task
-    });
-  } catch(error) {
-    console.error('Ошибка создания задания:', error);
-    errlog(`Ошибка создания задания. ${error}`);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
+        if (fullPath.size() == 3) return driveItem;
+
+        size_t pos = 3;
+        HTREEITEM current = driveItem;
+        while (pos < fullPath.size()) {
+            size_t next = fullPath.find(L'\\', pos);
+            std::wstring part = fullPath.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos);
+            if (part.empty()) break;
+
+            ExpandTreeItem(hTree, current);
+
+            HTREEITEM child = TreeView_GetChild(hTree, current);
+            HTREEITEM foundChild = nullptr;
+            while (child) {
+                TVITEMW tv{}; tv.mask = TVIF_PARAM; tv.hItem = child; TreeView_GetItem(hTree, &tv);
+                NodeData *cd = reinterpret_cast<NodeData*>(tv.lParam);
+                if (cd) {
+                    const wchar_t *lastSep = wcsrchr(cd->path.c_str(), L'\\');
+                    std::wstring last = lastSep ? std::wstring(lastSep + 1) : cd->path;
+                    if (_wcsicmp(last.c_str(), part.c_str()) == 0) { foundChild = child; break; }
+                }
+                child = TreeView_GetNextSibling(hTree, child);
+            }
+            if (!foundChild) return current;
+            current = foundChild;
+            if (next == std::wstring::npos) break;
+            pos = next + 1;
+        }
+        return current;
+    }
+    
+    void AddDriveRoots(HWND hTree) {
+        DWORD mask = GetLogicalDrives();
+        for (int i = 0; i < 26; ++i) {
+            if (mask & (1u << i)) {
+                wchar_t drive[4] = { wchar_t('A' + i), L':', L'\\', 0 };
+                UINT driveType = GetDriveTypeW(drive);
+                
+                if (driveType == DRIVE_REMOTE) {
+                    continue;
+                }
+                
+                std::wstring label = std::wstring(drive);
+                bool hasChildren = HasSubdirs(label);
+                InsertTreeItem(hTree, TVI_ROOT, label, label, hasChildren);
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+\textbf{Network}
+\begin{lstlisting}[style=CodeListing]
+// Winsock must be included before windows.h
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <commctrl.h>
+#include <winnetwk.h>
+#include <iphlpapi.h>
+#include "../../include/network.h"
+#include "../../include/filesystem.h"
+#include <algorithm>
+
+namespace Network {
+    bool IsValidDeviceIP(const std::wstring& ip) {
+        unsigned int b1, b2, b3, b4;
+        if (swscanf(ip.c_str(), L"%u.%u.%u.%u", &b1, &b2, &b3, &b4) != 4) {
+            return false;
+        }
+        
+        if (b1 == 0 && b2 == 0 && b3 == 0 && b4 == 0) return false;
+        if (b1 == 127) return false;
+        if (b1 >= 224 && b1 <= 239) return false;
+        if (b1 >= 240) return false;
+        if (b1 == 255 && b2 == 255 && b3 == 255 && b4 == 255) return false;
+        
+        return true;
+    }
+    
+    std::vector<std::wstring> GetNetworkIPsFromARP() {
+        std::set<std::wstring> ipSet;
+        std::set<std::wstring> localIPs;
+        std::wstring defaultGateway;
+        
+        PMIB_IPADDRTABLE pIpAddrTable = nullptr;
+        ULONG ulSize = 0;
+        if (GetIpAddrTable(nullptr, &ulSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+            pIpAddrTable = (PMIB_IPADDRTABLE)malloc(ulSize);
+            if (GetIpAddrTable(pIpAddrTable, &ulSize, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < pIpAddrTable->dwNumEntries; i++) {
+                    MIB_IPADDRROW* row = &pIpAddrTable->table[i];
+                    if (row->dwAddr != 0 && row->dwAddr != 0x0100007F) {
+                        IN_ADDR addr;
+                        addr.S_un.S_addr = row->dwAddr;
+                        wchar_t ipStr[16];
+                        swprintf(ipStr, 16, L"%d.%d.%d.%d",
+                                addr.S_un.S_un_b.s_b1,
+                                addr.S_un.S_un_b.s_b2,
+                                addr.S_un.S_un_b.s_b3,
+                                addr.S_un.S_un_b.s_b4);
+                        localIPs.insert(ipStr);
+                    }
+                }
+            }
+            free(pIpAddrTable);
+        }
+        
+        PMIB_IPFORWARDTABLE pForwardTable = nullptr;
+        ulSize = 0;
+        if (GetIpForwardTable(nullptr, &ulSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+            pForwardTable = (PMIB_IPFORWARDTABLE)malloc(ulSize);
+            if (GetIpForwardTable(pForwardTable, &ulSize, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < pForwardTable->dwNumEntries; i++) {
+                    MIB_IPFORWARDROW* row = &pForwardTable->table[i];
+                    if (row->dwForwardDest == 0 && row->dwForwardMask == 0) {
+                        IN_ADDR addr;
+                        addr.S_un.S_addr = row->dwForwardNextHop;
+                        if (addr.S_un.S_addr != 0) {
+                            wchar_t gatewayStr[16];
+                            swprintf(gatewayStr, 16, L"%d.%d.%d.%d",
+                                    addr.S_un.S_un_b.s_b1,
+                                    addr.S_un.S_un_b.s_b2,
+                                    addr.S_un.S_un_b.s_b3,
+                                    addr.S_un.S_un_b.s_b4);
+                            defaultGateway = gatewayStr;
+                            break;
+                        }
+                    }
+                }
+            }
+            free(pForwardTable);
+        }
+        
+        PMIB_IPNETTABLE pArpTable = nullptr;
+        ulSize = 0;
+        if (GetIpNetTable(nullptr, &ulSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+            pArpTable = (PMIB_IPNETTABLE)malloc(ulSize);
+            if (GetIpNetTable(pArpTable, &ulSize, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < pArpTable->dwNumEntries; i++) {
+                    MIB_IPNETROW* row = &pArpTable->table[i];
+                    if (row->dwType == MIB_IPNET_TYPE_DYNAMIC || row->dwType == MIB_IPNET_TYPE_STATIC) {
+                        IN_ADDR addr;
+                        addr.S_un.S_addr = row->dwAddr;
+                        wchar_t ipStr[16];
+                        swprintf(ipStr, 16, L"%d.%d.%d.%d",
+                                addr.S_un.S_un_b.s_b1,
+                                addr.S_un.S_un_b.s_b2,
+                                addr.S_un.S_un_b.s_b3,
+                                addr.S_un.S_un_b.s_b4);
+                        std::wstring ip = ipStr;
+                        
+                        if (IsValidDeviceIP(ip) && localIPs.find(ip) == localIPs.end()) {
+                            ipSet.insert(ip);
+                        }
+                    }
+                }
+            }
+            free(pArpTable);
+        }
+        
+        if (!defaultGateway.empty() && 
+            IsValidDeviceIP(defaultGateway) && 
+            localIPs.find(defaultGateway) == localIPs.end() &&
+            ipSet.find(defaultGateway) == ipSet.end()) {
+            ipSet.insert(defaultGateway);
+        }
+        
+        std::vector<std::wstring> devices;
+        for (const auto& ip : ipSet) {
+            devices.push_back(L"\\\\" + ip);
+        }
+        
+        return devices;
+    }
+    
+    void EnumerateNetworkResourcesRecursive(NETRESOURCEW* pNetResource, 
+                                           std::set<std::wstring>& devicesSet, 
+                                           int depth) {
+        if (depth > 5) return; // Prevent infinite recursion
+        
+        HANDLE hEnum = nullptr;
+        DWORD dwFlags = 0;
+        // Use appropriate flags for enumeration
+        if (pNetResource == nullptr) {
+            // Root enumeration - find both containers and connectable resources
+            dwFlags = RESOURCEUSAGE_CONTAINER | RESOURCEUSAGE_CONNECTABLE;
+        } else {
+            // Use flags from the resource, but ensure we get containers
+            dwFlags = 0; // Will use resource's flags
+        }
+        
+        DWORD result = WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_ANY, dwFlags, pNetResource, &hEnum);
+        
+        if (result == NO_ERROR && hEnum) {
+            DWORD bufferSize = 32768; // Larger buffer for more devices
+            NETRESOURCEW* pBuffer = (NETRESOURCEW*)malloc(bufferSize);
+            
+            while (true) {
+                DWORD count = 0xFFFFFFFF;
+                result = WNetEnumResourceW(hEnum, &count, pBuffer, &bufferSize);
+                
+                if (result == NO_ERROR && count > 0) {
+                    for (DWORD i = 0; i < count; ++i) {
+                        if (pBuffer[i].lpRemoteName) {
+                            std::wstring remoteName = pBuffer[i].lpRemoteName;
+                            
+                            // Add servers (\\computername) to the set
+                            if (remoteName.length() >= 2 && remoteName[0] == L'\\' && remoteName[1] == L'\\') {
+                                size_t thirdSlash = remoteName.find(L'\\', 2);
+                                if (thirdSlash == std::wstring::npos) {
+                                    // This is a server name (\\computername), add it
+                                    devicesSet.insert(remoteName);
+                                } else {
+                                    // This is a share (\\computername\share), extract server name
+                                    std::wstring serverName = remoteName.substr(0, thirdSlash);
+                                    devicesSet.insert(serverName);
+                                }
+                            }
+                            
+                            // Recursively enumerate containers (workgroups, domains)
+                            if (pBuffer[i].dwUsage & RESOURCEUSAGE_CONTAINER) {
+                                EnumerateNetworkResourcesRecursive(&pBuffer[i], devicesSet, depth + 1);
+                            }
+                        }
+                        // Also check for connectable resources that might be servers
+                        if ((pBuffer[i].dwUsage & RESOURCEUSAGE_CONNECTABLE) && pBuffer[i].lpRemoteName) {
+                            std::wstring remoteName = pBuffer[i].lpRemoteName;
+                            if (remoteName.length() >= 2 && remoteName[0] == L'\\' && remoteName[1] == L'\\') {
+                                size_t thirdSlash = remoteName.find(L'\\', 2);
+                                if (thirdSlash == std::wstring::npos) {
+                                    devicesSet.insert(remoteName);
+                                } else {
+                                    std::wstring serverName = remoteName.substr(0, thirdSlash);
+                                    devicesSet.insert(serverName);
+                                }
+                            }
+                        }
+                    }
+                } else if (result == ERROR_NO_MORE_ITEMS) {
+                    break;
+                } else {
+                    // Error occurred - may need larger buffer or different approach
+                    // Try with larger buffer
+                    if (result == ERROR_MORE_DATA) {
+                        free(pBuffer);
+                        bufferSize *= 2;
+                        if (bufferSize > 65536) break; // Limit buffer size
+                        pBuffer = (NETRESOURCEW*)malloc(bufferSize);
+                        continue;
+                    }
+                    break;
+                }
+            }
+            
+            free(pBuffer);
+            WNetCloseEnum(hEnum);
+        }
+    }
+    
+    std::vector<std::wstring> EnumerateNetworkDrives() {
+        std::vector<std::wstring> devices;
+        DWORD mask = GetLogicalDrives();
+        
+        for (int i = 0; i < 26; ++i) {
+            if (mask & (1u << i)) {
+                wchar_t drive[4] = { wchar_t('A' + i), L':', L'\\', 0 };
+                UINT driveType = GetDriveTypeW(drive);
+                
+                if (driveType == DRIVE_REMOTE) {
+                    wchar_t remotePath[MAX_PATH + 1] = {0};
+                    DWORD bufSize = MAX_PATH;
+                    
+                    if (WNetGetConnectionW(drive, remotePath, &bufSize) == NO_ERROR) {
+                        devices.push_back(remotePath);
+                    } else {
+                        devices.push_back(drive);
+                    }
+                }
+            }
+        }
+        
+        return devices;
+    }
+    
+    std::vector<std::wstring> EnumerateUSBDevices() {
+        std::vector<std::wstring> devices;
+        DWORD mask = GetLogicalDrives();
+        
+        for (int i = 0; i < 26; ++i) {
+            if (mask & (1u << i)) {
+                wchar_t drive[4] = { wchar_t('A' + i), L':', L'\\', 0 };
+                UINT driveType = GetDriveTypeW(drive);
+                
+                if (driveType == DRIVE_REMOVABLE || driveType == DRIVE_CDROM || driveType == DRIVE_RAMDISK) {
+                    wchar_t volumeName[MAX_PATH + 1] = {0};
+                    wchar_t fileSystemName[MAX_PATH + 1] = {0};
+                    DWORD serialNumber = 0;
+                    
+                    if (GetVolumeInformationW(drive, volumeName, MAX_PATH, &serialNumber, nullptr, nullptr, fileSystemName, MAX_PATH)) {
+                        devices.push_back(drive);
+                    } else {
+                        devices.push_back(drive);
+                    }
+                }
+            }
+        }
+        
+        return devices;
+    }
+    
+    std::vector<std::wstring> EnumerateNetworkDevices() {
+        std::set<std::wstring> devicesSet;
+        std::vector<std::wstring> devices;
+        
+        // Method 1: Add network drives FIRST (mapped to drive letters like Z:, Y:, etc.)
+        // These should always appear in the network view
+        std::vector<std::wstring> networkDrives = EnumerateNetworkDrives();
+        for (const auto& dev : networkDrives) {
+            if (!dev.empty()) {
+                devicesSet.insert(dev);
+            }
+        }
+        
+        // Method 2: Enumerate all network resources starting from root (like Windows Explorer Network view)
+        // This is the main method that finds network computers and shares
+        NETRESOURCEW* pNetResource = nullptr;
+        EnumerateNetworkResourcesRecursive(pNetResource, devicesSet, 0);
+        
+        // Method 3: Enumerate workgroups/domains and their servers
+        NETRESOURCEW nr{};
+        nr.dwScope = RESOURCE_GLOBALNET;
+        nr.dwType = RESOURCETYPE_ANY;
+        nr.dwUsage = RESOURCEUSAGE_CONTAINER;
+        nr.dwDisplayType = RESOURCEDISPLAYTYPE_DOMAIN;
+        EnumerateNetworkResourcesRecursive(&nr, devicesSet, 0);
+        
+        // Method 4: Enumerate servers directly (RESOURCEDISPLAYTYPE_SERVER)
+        nr.dwScope = RESOURCE_GLOBALNET;
+        nr.dwType = RESOURCETYPE_ANY;
+        nr.dwUsage = RESOURCEUSAGE_ALL;
+        nr.dwDisplayType = RESOURCEDISPLAYTYPE_SERVER;
+        EnumerateNetworkResourcesRecursive(&nr, devicesSet, 0);
+        
+        // Method 5: Enumerate all disk shares (RESOURCETYPE_DISK)
+        nr.dwScope = RESOURCE_GLOBALNET;
+        nr.dwType = RESOURCETYPE_DISK;
+        nr.dwUsage = RESOURCEUSAGE_ALL;
+        nr.dwDisplayType = RESOURCEDISPLAYTYPE_GENERIC;
+        EnumerateNetworkResourcesRecursive(&nr, devicesSet, 0);
+        
+        // Method 6: Try to enumerate from Network Neighborhood root
+        // This mimics what Windows Explorer shows in Network view
+        HANDLE hEnum = nullptr;
+        DWORD result = WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_ANY, 
+                                     RESOURCEUSAGE_CONTAINER | RESOURCEUSAGE_CONNECTABLE,
+                                     nullptr, &hEnum);
+        if (result == NO_ERROR && hEnum) {
+            DWORD bufferSize = 16384;
+            NETRESOURCEW* pBuffer = (NETRESOURCEW*)malloc(bufferSize);
+            DWORD count = 0xFFFFFFFF;
+            
+            while (true) {
+                count = 0xFFFFFFFF;
+                result = WNetEnumResourceW(hEnum, &count, pBuffer, &bufferSize);
+                if (result == NO_ERROR && count > 0) {
+                    for (DWORD i = 0; i < count; i++) {
+                        if (pBuffer[i].lpRemoteName) {
+                            std::wstring remoteName = pBuffer[i].lpRemoteName;
+                            // Add servers (\\computername)
+                            if (remoteName.length() >= 2 && remoteName[0] == L'\\' && remoteName[1] == L'\\') {
+                                size_t thirdSlash = remoteName.find(L'\\', 2);
+                                if (thirdSlash == std::wstring::npos) {
+                                    // It's a server, add it
+                                    devicesSet.insert(remoteName);
+                                }
+                            }
+                            // Recursively enumerate containers
+                            if (pBuffer[i].dwUsage & RESOURCEUSAGE_CONTAINER) {
+                                EnumerateNetworkResourcesRecursive(&pBuffer[i], devicesSet, 0);
+                            }
+                        }
+                    }
+                } else if (result == ERROR_NO_MORE_ITEMS) {
+                    break;
+                } else {
+                    break;
+                }
+            }
+            free(pBuffer);
+            WNetCloseEnum(hEnum);
+        }
+        
+        // Method 7: Add devices from ARP table (IP addresses of devices in local network)
+        // This helps find devices that might not be in network enumeration
+        std::vector<std::wstring> arpDevices = GetNetworkIPsFromARP();
+        for (const auto& dev : arpDevices) {
+            if (!dev.empty()) {
+                devicesSet.insert(dev);
+            }
+        }
+        
+        // Convert set to vector
+        for (const auto& dev : devicesSet) {
+            if (!dev.empty()) {
+                devices.push_back(dev);
+            }
+        }
+        
+        return devices;
+    }
+    
+    std::vector<std::wstring> EnumerateNetworkShares(const std::wstring& serverPath) {
+        std::vector<std::wstring> shares;
+        
+        NETRESOURCEW nr{};
+        nr.dwScope = RESOURCE_GLOBALNET;
+        nr.dwType = RESOURCETYPE_DISK;
+        nr.dwUsage = RESOURCEUSAGE_CONNECTABLE;
+        nr.dwDisplayType = RESOURCEDISPLAYTYPE_SHARE;
+        nr.lpRemoteName = const_cast<wchar_t*>(serverPath.c_str());
+        
+        HANDLE hEnum = nullptr;
+        DWORD result = WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_DISK, 0, &nr, &hEnum);
+        
+        if (result == NO_ERROR && hEnum) {
+            DWORD bufferSize = 16384;
+            NETRESOURCEW* pBuffer = (NETRESOURCEW*)malloc(bufferSize);
+            DWORD entries = 0xFFFFFFFF;
+            
+            while (true) {
+                DWORD count = entries;
+                result = WNetEnumResourceW(hEnum, &count, pBuffer, &bufferSize);
+                
+                if (result == NO_ERROR) {
+                    for (DWORD i = 0; i < count; ++i) {
+                        if (pBuffer[i].lpRemoteName) {
+                            shares.push_back(pBuffer[i].lpRemoteName);
+                        }
+                    }
+                } else if (result == ERROR_NO_MORE_ITEMS) {
+                    break;
+                } else {
+                    break;
+                }
+            }
+            
+            free(pBuffer);
+            WNetCloseEnum(hEnum);
+        }
+        
+        return shares;
+    }
+    
+    bool DeviceHasChildren(const std::wstring& device) {
+        if (device.length() >= 2 && device[0] == L'\\' && device[1] == L'\\') {
+            size_t thirdSlash = device.find(L'\\', 2);
+            if (thirdSlash == std::wstring::npos) {
+                std::vector<std::wstring> shares = EnumerateNetworkShares(device);
+                return !shares.empty();
+            } else {
+                return Filesystem::HasSubdirs(device);
+            }
+        } else {
+            NETRESOURCEW nr{};
+            nr.dwScope = RESOURCE_GLOBALNET;
+            nr.dwType = RESOURCETYPE_ANY;
+            nr.dwUsage = RESOURCEUSAGE_CONTAINER;
+            nr.lpRemoteName = const_cast<wchar_t*>(device.c_str());
+            
+            HANDLE hEnum = nullptr;
+            DWORD enumResult = WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_ANY, 0, &nr, &hEnum);
+            if (enumResult == NO_ERROR && hEnum) {
+                DWORD bufferSize = 16384;
+                NETRESOURCEW* pBuffer = (NETRESOURCEW*)malloc(bufferSize);
+                DWORD count = 1;
+                enumResult = WNetEnumResourceW(hEnum, &count, pBuffer, &bufferSize);
+                bool hasChildren = (enumResult == NO_ERROR && count > 0);
+                free(pBuffer);
+                WNetCloseEnum(hEnum);
+                return hasChildren;
+            }
+        }
+        return false;
+    }
+    
+    void ExpandNetworkDevice(HWND hTree, HTREEITEM hItem) {
+        HTREEITEM hChild = TreeView_GetChild(hTree, hItem);
+        while (hChild) {
+            TVITEMW tvi{}; tvi.mask = TVIF_TEXT; tvi.hItem = hChild;
+            wchar_t buf[8]; tvi.pszText = buf; tvi.cchTextMax = 8;
+            TreeView_GetItem(hTree, &tvi);
+            if (wcscmp(buf, L"...") == 0) {
+                TreeView_DeleteItem(hTree, hChild);
+                break;
+            }
+            hChild = TreeView_GetNextSibling(hTree, hChild);
+        }
+        
+        TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem; TreeView_GetItem(hTree, &tvi);
+        Filesystem::NodeData *data = reinterpret_cast<Filesystem::NodeData*>(tvi.lParam);
+        if (!data || data->expanded) return;
+        
+        if (data->path.length() >= 2 && data->path[0] == L'\\' && data->path[1] == L'\\') {
+            size_t thirdSlash = data->path.find(L'\\', 2);
+            if (thirdSlash == std::wstring::npos) {
+                std::vector<std::wstring> shares = EnumerateNetworkShares(data->path);
+                
+                for (const auto& share : shares) {
+                    std::wstring displayName = share;
+                    size_t lastSlash = displayName.find_last_of(L'\\');
+                    if (lastSlash != std::wstring::npos && lastSlash < displayName.length() - 1) {
+                        displayName = displayName.substr(lastSlash + 1);
+                    }
+                    
+                    bool hasChildren = Filesystem::HasSubdirs(share);
+                    Filesystem::InsertTreeItem(hTree, hItem, displayName, share, hasChildren);
+                }
+                data->expanded = true;
+                return;
+            }
+        }
+        
+        Filesystem::ExpandTreeItem(hTree, hItem);
+    }
+    
+    void AddNetworkDevices(HWND hTree, const std::vector<std::wstring>& devices) {
+        // Don't add anything if devices list is empty - let caller handle that
+        if (devices.empty()) {
+            return;
+        }
+        
+        for (const auto& device : devices) {
+            // Skip empty devices
+            if (device.empty()) continue;
+            
+            std::wstring displayName = device;
+            
+            // Handle UNC paths (\\server\share)
+            if (device.length() >= 2 && device[0] == L'\\' && device[1] == L'\\') {
+                displayName = device.substr(2);
+                // Remove trailing backslashes
+                while (!displayName.empty() && displayName.back() == L'\\') {
+                    displayName.pop_back();
+                }
+                // If still empty after removing backslashes, use the original
+                if (displayName.empty()) {
+                    displayName = device;
+                }
+            } 
+            // Handle drive letters (Z:, Y:, etc.) - network drives
+            else if (device.length() >= 3 && device[1] == L':') {
+                wchar_t volumeName[MAX_PATH + 1] = {0};
+                if (GetVolumeInformationW(device.c_str(), volumeName, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0)) {
+                    if (wcslen(volumeName) > 0) {
+                        displayName = std::wstring(device.substr(0, 2)) + L" (" + volumeName + L")";
+                    } else {
+                        displayName = device.substr(0, 2);
+                    }
+                } else {
+                    displayName = device.substr(0, 2);
+                }
+            }
+            
+            if (displayName.empty()) continue;
+            
+            // Determine if device has children (shares or subdirectories)
+            bool hasChildren = false;
+            if (device.length() >= 2 && device[0] == L'\\' && device[1] == L'\\') {
+                size_t thirdSlash = device.find(L'\\', 2);
+                if (thirdSlash == std::wstring::npos) {
+                    // This is a server (\\server), check if it has shares
+                    hasChildren = DeviceHasChildren(device);
+                    // Always assume servers might have children, even if check fails
+                    if (!hasChildren) {
+                        hasChildren = true; // Allow expansion attempt
+                    }
+                } else {
+                    // This is a share or subdirectory (\\server\share)
+                    hasChildren = DeviceHasChildren(device);
+                }
+            } else if (device.length() >= 3 && device[1] == L':') {
+                // Network drive - check if it has subdirectories
+                hasChildren = Filesystem::HasSubdirs(device);
+            }
+            
+            Filesystem::InsertTreeItem(hTree, TVI_ROOT, displayName, device, hasChildren);
+        }
+    }
+}
+\end{lstlisting}
+
+\textbf{Settings}
+\begin{lstlisting}[style=CodeListing]
+#include "../../include/settings.h"
+#include "../../include/config.h"
+#include <algorithm>
+
+namespace Settings {
+    // Global state
+    static ThemeChoice g_themeChoice = ThemeChoice::System;
+    static COLORREF g_colBg = RGB(255,255,255);
+    static COLORREF g_colText = RGB(0,0,0);
+    static HBRUSH g_hBgBrush = nullptr;
+    static std::wstring g_fontFace = L"Segoe UI";
+    static int g_fontPt = 12;
+    static HFONT g_hFont = nullptr;
+    
+    ThemeChoice GetTheme() {
+        return g_themeChoice;
+    }
+    
+    void SetTheme(ThemeChoice theme) {
+        g_themeChoice = theme;
+    }
+    
+    COLORREF GetBackgroundColor() {
+        return g_colBg;
+    }
+    
+    COLORREF GetTextColor() {
+        return g_colText;
+    }
+    
+    HBRUSH GetBackgroundBrush() {
+        return g_hBgBrush;
+    }
+    
+    void SetBackgroundBrush(HBRUSH brush) {
+        if (g_hBgBrush && g_hBgBrush != brush) {
+            DeleteObject(g_hBgBrush);
+        }
+        g_hBgBrush = brush;
+    }
+    
+    bool QuerySystemAppsUseLightTheme() {
+        DWORD value = 1;
+        DWORD size = sizeof(value);
+        LSTATUS st = RegGetValueW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+        if (st != ERROR_SUCCESS) return true; // default light if missing
+        return value != 0;
+    }
+    
+    void UpdateThemeColors() {
+        ThemeChoice effective = g_themeChoice;
+        if (effective == ThemeChoice::System) {
+            effective = QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+        }
+        if (effective == ThemeChoice::Dark) {
+            g_colBg = RGB(25, 25, 25);
+            g_colText = RGB(255, 255, 255);
+        } else {
+            g_colBg = RGB(255,255,255);
+            g_colText = RGB(0,0,0);
+        }
+        if (g_hBgBrush) { 
+            DeleteObject(g_hBgBrush); 
+            g_hBgBrush = nullptr; 
+        }
+        g_hBgBrush = CreateSolidBrush(g_colBg);
+    }
+    
+    std::wstring GetFontFace() {
+        return g_fontFace;
+    }
+    
+    void SetFontFace(const std::wstring& face) {
+        g_fontFace = face;
+    }
+    
+    int GetFontSize() {
+        return g_fontPt;
+    }
+    
+    void SetFontSize(int size) {
+        g_fontPt = size;
+    }
+    
+    HFONT GetFont() {
+        if (!g_hFont) {
+            // Create font if it doesn't exist
+            HDC hdc = GetDC(nullptr);
+            int logPix = GetDeviceCaps(hdc, LOGPIXELSY);
+            ReleaseDC(nullptr, hdc);
+            int height = -MulDiv(g_fontPt, logPix, 72);
+            g_hFont = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  DEFAULT_PITCH | FF_DONTCARE, g_fontFace.c_str());
+        }
+        return g_hFont;
+    }
+    
+    void SetFont(HFONT font) {
+        if (g_hFont && g_hFont != font) {
+            DeleteObject(g_hFont);
+        }
+        g_hFont = font;
+    }
+    
+    void RecreateFont() {
+        if (g_hFont) {
+            DeleteObject(g_hFont);
+            g_hFont = nullptr;
+        }
+        GetFont(); // This will create the font
+    }
+    
+    void Save() {
+        HKEY hKey;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\KursWork\\FileManager", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+            DWORD theme = (DWORD)g_themeChoice;
+            RegSetValueExW(hKey, L"Theme", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&theme), sizeof(theme));
+            DWORD size = (DWORD)g_fontPt;
+            RegSetValueExW(hKey, L"FontSize", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&size), sizeof(size));
+            RegSetValueExW(hKey, L"FontFace", 0, REG_SZ, reinterpret_cast<const BYTE*>(g_fontFace.c_str()), (DWORD)((g_fontFace.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(hKey);
+        }
+    }
+    
+    void Load() {
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\KursWork\\FileManager", 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+            DWORD theme = (DWORD)ThemeChoice::System; 
+            DWORD sz = sizeof(theme);
+            if (RegGetValueW(hKey, nullptr, L"Theme", RRF_RT_REG_DWORD, nullptr, &theme, &sz) == ERROR_SUCCESS) {
+                if (theme <= (DWORD)ThemeChoice::Dark) g_themeChoice = (ThemeChoice)theme;
+            }
+            DWORD size = 12; 
+            sz = sizeof(size);
+            if (RegGetValueW(hKey, nullptr, L"FontSize", RRF_RT_REG_DWORD, nullptr, &size, &sz) == ERROR_SUCCESS) {
+                if (size >= 8 && size <= 72) g_fontPt = (int)size;
+            }
+            wchar_t buf[128]; 
+            DWORD bytes = sizeof(buf);
+            if (RegGetValueW(hKey, nullptr, L"FontFace", RRF_RT_REG_SZ, nullptr, buf, &bytes) == ERROR_SUCCESS) {
+                g_fontFace = buf;
+            }
+            RegCloseKey(hKey);
+        }
+        UpdateThemeColors();
+    }
+}
+\end{lstlisting}
+
+\textbf{UI}
+\begin{lstlisting}[style=CodeListing]
+// Control initialization module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/filesystem.h"
+#include "../../include/network.h"
+#include "../../include/settings.h"
+#include "../../include/config.h"
+#include <windows.h>
+#include <commctrl.h>
+#include <shellapi.h>
+#include <gdiplus.h>
+#include <thread>
+#include <mutex>
+
+using namespace Gdiplus;
+
+// Forward declarations
+extern WindowData* GetWindowData(HWND hwnd);
+extern void SetWindowDataInternal(HWND hwnd, WindowData* data);
+extern LRESULT CALLBACK BorderSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+extern LRESULT CALLBACK ListViewSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+
+namespace UI {
+    void AddTooltipFor(HWND hParent, HWND hCtrl, const wchar_t *text) {
+        HWND hToolTip = GetToolTip(hParent);
+        if (!hToolTip) {
+            hToolTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                hParent, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SetWindowPos(hToolTip, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SendMessageW(hToolTip, TTM_SETMAXTIPWIDTH, 0, 300);
+            SetToolTip(hParent, hToolTip);
+        }
+        TOOLINFOW ti{}; ti.cbSize = sizeof(ti);
+        ti.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
+        ti.hwnd = hParent;
+        ti.uId = (UINT_PTR)hCtrl;
+        ti.lpszText = const_cast<wchar_t*>(text);
+        GetClientRect(hCtrl, &ti.rect);
+        SendMessageW(hToolTip, TTM_ADDTOOL, 0, (LPARAM)&ti);
+    }
+    
+    HICON LoadIconFromPNG(const wchar_t *path, ULONG_PTR gdiplusToken) {
+        HICON hIcon = nullptr;
+        Image *image = new Image(path);
+        if (image && image->GetLastStatus() == Ok) {
+            int smallIconSize = GetSystemMetrics(SM_CXSMICON);
+            int largeIconSize = GetSystemMetrics(SM_CXICON);
+            int iconSize = std::max(largeIconSize, 32);
+            if (iconSize < 16) iconSize = 32;
+            if (iconSize > 256) iconSize = 256;
+            Bitmap *bitmap = new Bitmap(iconSize, iconSize);
+            Graphics *graphics = Graphics::FromImage(bitmap);
+            graphics->SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            graphics->SetSmoothingMode(SmoothingModeHighQuality);
+            graphics->SetPixelOffsetMode(PixelOffsetModeHighQuality);
+            graphics->DrawImage(image, 0, 0, iconSize, iconSize);
+            bitmap->GetHICON(&hIcon);
+            delete graphics;
+            delete bitmap;
+            delete image;
+        } else {
+            if (image) delete image;
+        }
+        return hIcon;
+    }
+    
+    void InitializeControls(HWND hwnd, UIControls &controls, UIState &state) {
+        INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES };
+        InitCommonControlsEx(&icc);
+        
+        UI::BuildMenu(hwnd);
+        UI::BuildAccelerators(hwnd, controls.hAccel);
+        Settings::Load();
+        
+        // Create and store WindowData
+        WindowData* wndData = UI::CreateWindowData();
+        UI::InitializeWindowData(wndData, controls, state);
+        SetWindowDataInternal(hwnd, wndData);
+        
+        // Create buttons with Unicode arrow symbols
+        controls.hBackBtn = CreateWindowExW(0, L"BUTTON", L"◀", 
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 28, 28, hwnd, (HMENU)ID_BTN_BACK, GetModuleHandleW(nullptr), nullptr);
+        controls.hFwdBtn = CreateWindowExW(0, L"BUTTON", L"◀",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 28, 28, hwnd, (HMENU)ID_BTN_FWD, GetModuleHandleW(nullptr), nullptr);
+        SetWindowTextW(controls.hFwdBtn, L"▶");
+        controls.hViewDetailsBtn = CreateWindowExW(0, L"BUTTON", L"☰", 
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 28, 28, hwnd, (HMENU)ID_BTN_VIEW_DETAILS, GetModuleHandleW(nullptr), nullptr);
+        controls.hViewLargeBtn = CreateWindowExW(0, L"BUTTON", L"⬛",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 28, 28, hwnd, (HMENU)ID_BTN_VIEW_LARGE, GetModuleHandleW(nullptr), nullptr);
+        controls.hViewSmallBtn = CreateWindowExW(0, L"BUTTON", L"▤",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 28, 28, hwnd, (HMENU)ID_BTN_VIEW_SMALL, GetModuleHandleW(nullptr), nullptr);
+        
+        // Create path edit field
+        controls.hPathEdit = CreateWindowExW(0, L"EDIT", L"",
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | WS_BORDER,
+                                          0, 0, 200, 24, hwnd, (HMENU)ID_EDIT_PATH, GetModuleHandleW(nullptr), nullptr);
+        SetWindowSubclass(controls.hPathEdit, BorderSubclassProc, 1, 0);
+        
+        // Create Go button
+        controls.hGoBtn = CreateWindowExW(0, L"BUTTON", L"Перейти", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                       0, 0, 60, 24, hwnd, (HMENU)ID_BTN_GO, GetModuleHandleW(nullptr), nullptr);
+        
+        // Create trees
+        controls.hTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
+                                      WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | WS_BORDER,
+                                      0, 0, 100, 100, hwnd, (HMENU)ID_TREE_TOP, GetModuleHandleW(nullptr), nullptr);
+        SetWindowSubclass(controls.hTree, BorderSubclassProc, 1, 0);
+        
+        // Create splitter
+        controls.hSplitter = CreateWindowExW(0, L"STATIC", L"",
+                                        WS_CHILD | WS_VISIBLE,
+                                        0, 0, 100, 4, hwnd, (HMENU)ID_SPLITTER, GetModuleHandleW(nullptr), nullptr);
+        
+        // Create bottom tree for network devices
+        controls.hTreeBottom = CreateWindowExW(0, WC_TREEVIEWW, L"",
+                                           WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | WS_BORDER,
+                                           0, 0, 100, 100, hwnd, (HMENU)ID_TREE_BOTTOM, GetModuleHandleW(nullptr), nullptr);
+        SetWindowSubclass(controls.hTreeBottom, BorderSubclassProc, 1, 0);
+        
+        // Create list view
+        controls.hList = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                                      WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHAREIMAGELISTS | WS_BORDER,
+                                      0, 0, 100, 100, hwnd, (HMENU)ID_LIST, GetModuleHandleW(nullptr), nullptr);
+        SetWindowSubclass(controls.hList, BorderSubclassProc, 1, 0);
+        
+        // Attach system imagelists for icons
+        {
+            SHFILEINFOW sfi{};
+            HIMAGELIST hSmall = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            HIMAGELIST hLarge = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_LARGEICON);
+            if (hSmall) ListView_SetImageList(controls.hList, hSmall, LVSIL_SMALL);
+            if (hLarge) ListView_SetImageList(controls.hList, hLarge, LVSIL_NORMAL);
+        }
+        
+        // Set up list view columns
+        SetListColumns(controls.hList);
+        AdjustReportColumns(controls.hList);
+        DWORD ex = ListView_GetExtendedListViewStyle(controls.hList);
+        ex |= LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP;
+        ThemeChoice effective = Settings::GetTheme();
+        if (effective == ThemeChoice::System) {
+            effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+        }
+        if (effective != ThemeChoice::Dark) {
+            ex |= LVS_EX_GRIDLINES;
+        }
+        ListView_SetExtendedListViewStyle(controls.hList, ex);
+        
+        // Subclass ListView to draw empty message
+        state.oldListProc = (WNDPROC)SetWindowLongPtrW(controls.hList, GWLP_WNDPROC, (LONG_PTR)ListViewSubclassProc);
+        
+        // Create empty label
+        controls.hEmptyLabel = CreateWindowExW(0, L"STATIC", L"Выберите директорию",
+                                           WS_CHILD | SS_CENTER | SS_CENTERIMAGE,
+                                           0, 0, 100, 100, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        ShowWindow(controls.hEmptyLabel, SW_HIDE);
+        
+        // Create status bar
+        controls.hStatusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
+                                             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+                                             0, 0, 0, 0, hwnd, (HMENU)ID_STATUS_BAR, GetModuleHandleW(nullptr), nullptr);
+        int parts[] = { -1 };
+        SendMessageW(controls.hStatusBar, SB_SETPARTS, 1, (LPARAM)parts);
+        
+        AdjustReportColumns(controls.hList);
+        UpdateListViewRowHeight(controls.hList);
+        Filesystem::AddDriveRoots(controls.hTree);
+        
+        // Clear bottom tree and add loading placeholder
+        TreeView_DeleteAllItems(controls.hTreeBottom);
+        state.loadingItem = Filesystem::InsertTreeItem(controls.hTreeBottom, TVI_ROOT, L"Загрузка...", L"", false);
+        UI::UpdateWindowState(hwnd, state);
+        
+        LayoutChildren(hwnd, controls, state);
+        
+        // Start network scan in background thread
+        state.networkScanInProgress = true;
+        UI::UpdateWindowState(hwnd, state);
+        std::thread([hwnd]() {
+            std::vector<std::wstring> devices;
+            try {
+                Sleep(100);
+                devices = Network::EnumerateNetworkDevices();
+            } catch (const std::exception& e) {
+                devices.clear();
+            } catch (...) {
+                devices.clear();
+            }
+            
+            UI::UpdateScannedDevices(hwnd, devices);
+            PostMessageW(hwnd, WM_USER_NETWORK_SCAN_COMPLETE, 0, 0);
+        }).detach();
+        
+        UI::UpdateWindowData(hwnd, controls, state);
+        
+        EnableWindow(controls.hBackBtn, FALSE);
+        EnableWindow(controls.hFwdBtn, FALSE);
+        UI::ApplyThemeToControls(hwnd, controls);
+        UI::ApplyFontToControls(hwnd, controls);
+        UI::UpdateMenuChecks(hwnd);
+        
+        if (state.currentPath.empty()) {
+            ShowMessage(controls.hList, controls.hEmptyLabel, L"Выберите директорию");
+        }
+        
+        UI::AddTooltipFor(hwnd, controls.hBackBtn, L"Назад\nAlt+Left");
+        UI::AddTooltipFor(hwnd, controls.hFwdBtn, L"Вперёд\nAlt+Right");
+        UI::AddTooltipFor(hwnd, controls.hViewDetailsBtn, L"Вид: Подробно");
+        UI::AddTooltipFor(hwnd, controls.hViewLargeBtn, L"Вид: Крупные значки");
+        UI::AddTooltipFor(hwnd, controls.hViewSmallBtn, L"Вид: Мелкие значки");
+        if (controls.hGoBtn) UI::AddTooltipFor(hwnd, controls.hGoBtn, L"Перейти к указанному пути");
+    }
 }
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <!-- Favicon -->
-    <link
-      rel="apple-touch-icon"
-      sizes="180x180"
-      href="/favicon/apple-touch-icon.png"
-    />
-    <link
-      rel="icon"
-      type="image/png"
-      sizes="32x32"
-      href="/favicon/favicon-32x32.png"
-    />
-    <link
-      rel="icon"
-      type="image/png"
-      sizes="16x16"
-      href="/favicon/favicon-16x16.png"
-    />
-    <meta name="theme-color" content="#000000" />
-    <link rel="manifest" href="./manifest.json" />
-    <!-- Using Google Font -->
-    <link rel="preconnect" href="https://fonts.gstatic.com" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <meta 
-      name="viewport"
-      content="width=device-width, initial-scale=1.0"
-    />
-    <title>CRM system</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script src="/env-config.js"></script>
-    <script type="module" src="/src/application/root.jsx"></script>
-  </body>
-</html>
+// Layout management module
 
-export const fetchUserInfo = async () => {
-  const response = await httpClient.get('/auth/me');
-  return response.data;
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/settings.h"
+#include <windows.h>
+
+namespace UI {
+    void LayoutChildren(HWND hwnd, UIControls &controls, UIState &state) {
+        RECT rc; GetClientRect(hwnd, &rc);
+        int width = rc.right - rc.left;
+        int height = rc.bottom - rc.top;
+        int leftW = width / 3;
+        int rightX = leftW;
+        
+        // Calculate sizes based on font size for adaptive layout
+        int fontSize = Settings::GetFontSize();
+        HDC hdc = GetDC(hwnd);
+        int logPix = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(hwnd, hdc);
+        // Base size scales with font (12pt = 32px control bar, scale proportionally)
+        int ctlBarH = MulDiv(fontSize * 8, logPix, 72 * 3); // Approximately fontSize * 2.67
+        if (ctlBarH < 24) ctlBarH = 24; // Minimum height
+        if (ctlBarH > 60) ctlBarH = 60; // Maximum height
+        
+        int pad = fontSize / 2; // Padding scales with font
+        if (pad < 4) pad = 4;
+        if (pad > 12) pad = 12;
+        
+        int btnH = ctlBarH - pad - pad/2;
+        int btnW = btnH; // Square buttons
+        int x = rightX + pad;
+        int splitterH = 4;
+        
+        int minTreeH = 50;
+        if (state.splitterPos < minTreeH) state.splitterPos = minTreeH;
+        if (state.splitterPos > height - minTreeH - splitterH) state.splitterPos = height - minTreeH - splitterH;
+        
+        int topTreeH = state.splitterPos;
+        MoveWindow(controls.hTree, 0, 0, leftW, topTreeH, TRUE);
+        MoveWindow(controls.hSplitter, 0, topTreeH, leftW, splitterH, TRUE);
+        
+        int bottomTreeY = topTreeH + splitterH;
+        int bottomTreeH = height - bottomTreeY;
+        MoveWindow(controls.hTreeBottom, 0, bottomTreeY, leftW, bottomTreeH, TRUE);
+        
+        MoveWindow(controls.hBackBtn, x, pad, btnW, btnH, TRUE); x += btnW + pad;
+        MoveWindow(controls.hFwdBtn, x, pad, btnW, btnH, TRUE); x += btnW + pad*2;
+        MoveWindow(controls.hViewDetailsBtn, x, pad, btnW, btnH, TRUE); x += btnW + pad;
+        MoveWindow(controls.hViewLargeBtn, x, pad, btnW, btnH, TRUE); x += btnW + pad;
+        MoveWindow(controls.hViewSmallBtn, x, pad, btnW, btnH, TRUE); x += btnW + pad*2;
+        
+        int pathEditX = x;
+        // Go button width scales with font
+        int goBtnW = MulDiv(fontSize * 5, logPix, 72); // Approximately fontSize * 0.7
+        if (goBtnW < 50) goBtnW = 50;
+        if (goBtnW > 100) goBtnW = 100;
+        int pathEditW = width - pathEditX - goBtnW - pad;
+        if (controls.hPathEdit && controls.hGoBtn) {
+            if (pathEditW > 100) {
+                ShowWindow(controls.hPathEdit, SW_SHOW);
+                MoveWindow(controls.hPathEdit, pathEditX, pad, pathEditW, btnH, TRUE);
+                MoveWindow(controls.hGoBtn, pathEditX + pathEditW, pad, goBtnW, btnH, TRUE);
+            } else {
+                ShowWindow(controls.hPathEdit, SW_HIDE);
+                MoveWindow(controls.hGoBtn, pathEditX, pad, goBtnW, btnH, TRUE);
+            }
+        }
+        
+        int listX = rightX;
+        int listY = ctlBarH;
+        int listW = width - rightX;
+        int listH = height - ctlBarH;
+        MoveWindow(controls.hList, listX, listY, listW, listH, TRUE);
+        if (controls.hEmptyLabel) {
+            MoveWindow(controls.hEmptyLabel, listX, listY, listW, listH, TRUE);
+        }
+        if (controls.hStatusBar) {
+            RECT statusRect;
+            GetClientRect(controls.hStatusBar, &statusRect);
+            MoveWindow(controls.hStatusBar, listX, height - statusRect.bottom, listW, statusRect.bottom, TRUE);
+        }
+    }
+}
+
+// List view operations module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/settings.h"
+#include <windows.h>
+#include <commctrl.h>
+#include <shellapi.h>
+
+namespace UI {
+    // Helper function to get icon size based on font size
+    int GetIconSize() {
+        int fontSize = Settings::GetFontSize();
+        HDC hdc = GetDC(nullptr);
+        int logPix = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(nullptr, hdc);
+        // Icon size should be roughly 1.5x font height for good visibility
+        int iconSize = MulDiv(fontSize * 3, logPix, 72 * 2); // fontSize * 1.5
+        // Clamp to reasonable sizes (16-48 pixels)
+        if (iconSize < 16) iconSize = 16;
+        if (iconSize > 48) iconSize = 48;
+        return iconSize;
+    }
+    
+    // Update list view row height to accommodate proportional icon size
+    void UpdateListViewRowHeight(HWND hList) {
+        int fontSize = Settings::GetFontSize();
+        HDC hdc = GetDC(nullptr);
+        int logPix = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(nullptr, hdc);
+        // Row height should be proportional to font size (1.8x font height for icon + text)
+        int rowHeight = MulDiv(fontSize * 9, logPix, 72 * 5); // fontSize * 1.8
+        // Clamp to reasonable sizes
+        if (rowHeight < 20) rowHeight = 20;
+        if (rowHeight > 60) rowHeight = 60;
+        // Use LVM_SETITEMHEIGHT message directly
+        #ifndef LVM_FIRST
+        #define LVM_FIRST 0x1000
+        #endif
+        #ifndef LVM_SETITEMHEIGHT
+        #define LVM_SETITEMHEIGHT (LVM_FIRST + 141)
+        #endif
+        SendMessageW(hList, LVM_SETITEMHEIGHT, 0, (LPARAM)rowHeight);
+    }
+    
+    void SetListColumns(HWND hList) {
+        // Set extended style - gridlines will be drawn manually in dark theme
+        ThemeChoice effective = Settings::GetTheme();
+        if (effective == ThemeChoice::System) {
+            effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+        }
+        DWORD exStyle = LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP;
+        if (effective != ThemeChoice::Dark) {
+            exStyle |= LVS_EX_GRIDLINES; // Only use system gridlines in light theme
+        }
+        ListView_SetExtendedListViewStyle(hList, exStyle);
+        
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM | LVCF_FMT;
+        col.fmt = LVCFMT_LEFT;
+        wchar_t nameCol[] = L"Name";
+        wchar_t typeCol[] = L"Type";
+        wchar_t modCol[] = L"Modified";
+        col.pszText = nameCol;
+        col.cx = 360; col.iSubItem = 0; 
+        ListView_InsertColumn(hList, 0, &col);
+        col.pszText = typeCol;
+        col.cx = 120; col.iSubItem = 1; 
+        ListView_InsertColumn(hList, 1, &col);
+        col.pszText = modCol;
+        col.cx = 200; col.iSubItem = 2; 
+        ListView_InsertColumn(hList, 2, &col);
+    }
+    
+    void AdjustReportColumns(HWND hList) {
+        LONG_PTR style = GetWindowLongPtrW(hList, GWL_STYLE);
+        if ((style & LVS_TYPEMASK) != LVS_REPORT) return;
+        RECT rc{}; GetClientRect(hList, &rc);
+        int clientW = rc.right - rc.left;
+        if (GetWindowLongPtrW(hList, GWL_STYLE) & WS_VSCROLL) {
+            clientW -= GetSystemMetrics(SM_CXVSCROLL);
+        }
+        if (clientW <= 0) return;
+        int typeW = 120;
+        int modW = 200;
+        int minCol = 60;
+        int nameW = clientW - typeW - modW;
+        if (nameW < minCol) {
+            int deficit = minCol - nameW;
+            nameW = minCol;
+            int reduceType = std::min(deficit / 2, std::max(0, typeW - minCol));
+            typeW -= reduceType;
+            deficit -= reduceType;
+            int reduceMod = std::min(deficit, std::max(0, modW - minCol));
+            modW -= reduceMod;
+            deficit -= reduceMod;
+            if (deficit > 0) nameW = std::max(minCol, nameW - deficit);
+        }
+        ListView_SetColumnWidth(hList, 1, typeW);
+        ListView_SetColumnWidth(hList, 2, modW);
+        ListView_SetColumnWidth(hList, 0, std::max(1, clientW - typeW - modW));
+        ShowScrollBar(hList, SB_HORZ, FALSE);
+    }
+    
+    void SetListViewMode(HWND hList, DWORD mode) {
+        LONG_PTR style = GetWindowLongPtrW(hList, GWL_STYLE);
+        style &= ~(LVS_TYPEMASK);
+        style |= mode;
+        SetWindowLongPtrW(hList, GWL_STYLE, style);
+        if ((mode & LVS_TYPEMASK) == LVS_REPORT) {
+            while (ListView_DeleteColumn(hList, 0)) {}
+            SetListColumns(hList);
+            DWORD ex = ListView_GetExtendedListViewStyle(hList);
+            ex |= LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP;
+            ListView_SetExtendedListViewStyle(hList, ex);
+            // Ensure image lists are set for report mode too (icons in first column)
+            SHFILEINFOW sfi{};
+            HIMAGELIST hSmall = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            if (hSmall) {
+                ListView_SetImageList(hList, hSmall, LVSIL_SMALL);
+            }
+        }
+        // Ensure image lists are set for icon modes
+        if ((mode & LVS_TYPEMASK) == LVS_ICON || (mode & LVS_TYPEMASK) == LVS_SMALLICON) {
+            SHFILEINFOW sfi{};
+            HIMAGELIST hSmall = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            HIMAGELIST hLarge = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_LARGEICON);
+            if (hSmall) ListView_SetImageList(hList, hSmall, LVSIL_SMALL);
+            if (hLarge) ListView_SetImageList(hList, hLarge, LVSIL_NORMAL);
+        }
+        InvalidateRect(hList, nullptr, TRUE);
+    }
+    
+    bool IsReportMode(HWND hList) {
+        LONG_PTR style = GetWindowLongPtrW(hList, GWL_STYLE);
+        return (style & LVS_TYPEMASK) == LVS_REPORT;
+    }
+    
+    bool IsIconMode(HWND hList) {
+        LONG_PTR style = GetWindowLongPtrW(hList, GWL_STYLE);
+        DWORD t = (DWORD)(style & LVS_TYPEMASK);
+        return t == LVS_ICON || t == LVS_SMALLICON;
+    }
+    
+    void AdjustIconLayout(HWND hList) {
+        if (!IsIconMode(hList)) return;
+        RECT rc{}; GetClientRect(hList, &rc);
+        int clientW = rc.right - rc.left;
+        if (clientW <= 0) return;
+        LONG_PTR style = GetWindowLongPtrW(hList, GWL_STYLE);
+        BOOL isSmall = ((style & LVS_TYPEMASK) == LVS_SMALLICON);
+        if (isSmall) {
+            style &= ~LVS_ALIGNLEFT;
+            style |= LVS_AUTOARRANGE | LVS_ALIGNTOP;
+        } else {
+            style &= ~LVS_ALIGNTOP;
+            style |= LVS_AUTOARRANGE | LVS_ALIGNLEFT;
+        }
+        SetWindowLongPtrW(hList, GWL_STYLE, style);
+        LRESULT spacing = SendMessageW(hList, LVM_GETITEMSPACING, (WPARAM)isSmall, 0);
+        int defX = LOWORD(spacing);
+        int defY = HIWORD(spacing);
+        if (defX <= 0) defX = 100;
+        int cols = std::max(1, clientW / defX);
+        int newX = std::max(32, clientW / cols);
+        SendMessageW(hList, LVM_SETICONSPACING, 0, MAKELPARAM(newX, defY));
+        ListView_Arrange(hList, LVA_DEFAULT);
+        ShowScrollBar(hList, SB_HORZ, FALSE);
+    }
+    
+    void ClearList(HWND hList) {
+        ListView_DeleteAllItems(hList);
+    }
+    
+    void ShowMessage(HWND hList, HWND hEmptyLabel, const std::wstring &message) {
+        ClearList(hList);
+        
+        // Hide list view header when showing message
+        HWND hHeader = ListView_GetHeader(hList);
+        if (hHeader) {
+            ShowWindow(hHeader, SW_HIDE);
+        }
+        
+        if (hEmptyLabel) {
+            SetWindowTextW(hEmptyLabel, message.c_str());
+            ShowWindow(hEmptyLabel, SW_SHOW);
+            SetWindowPos(hEmptyLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            InvalidateRect(hEmptyLabel, nullptr, TRUE);
+        }
+        ShowWindow(hList, SW_HIDE);
+        InvalidateRect(hList, nullptr, TRUE);
+        UpdateWindow(hList);
+        RedrawWindow(hList, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
+    }
+    
+    void UpdateStatusBar(HWND hStatusBar, const std::vector<Filesystem::ListItem> &items) {
+        if (!hStatusBar) return;
+        
+        int fileCount = 0;
+        int dirCount = 0;
+        __int64 totalSize = 0;
+        
+        for (const auto& item : items) {
+            if (item.isDir) {
+                dirCount++;
+            } else {
+                fileCount++;
+                WIN32_FIND_DATAW fd{};
+                HANDLE h = FindFirstFileW(item.fullPath.c_str(), &fd);
+                if (h != INVALID_HANDLE_VALUE) {
+                    totalSize += ((__int64)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                    FindClose(h);
+                }
+            }
+        }
+        
+        wchar_t statusText[256];
+        if (fileCount == 0 && dirCount == 0) {
+            swprintf(statusText, 256, L"Готово");
+        } else {
+            swprintf(statusText, 256, L"Файлов: %d, Папок: %d", fileCount, dirCount);
+        }
+        SendMessageW(hStatusBar, SB_SETTEXT, 0, (LPARAM)statusText);
+    }
+}
+
+// Menu and accelerators module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/settings.h"
+#include "../../include/config.h"
+#include <windows.h>
+
+namespace UI {
+    void BuildMenu(HWND hwnd) {
+        HMENU hBar = CreateMenu();
+        HMENU hFile = CreatePopupMenu();
+        HMENU hSettings = CreatePopupMenu();
+        HMENU hTheme = CreatePopupMenu();
+        HMENU hFont = CreatePopupMenu();
+        HMENU hFontSize = CreatePopupMenu();
+        
+        AppendMenuW(hFile, MF_STRING, ID_MENU_FILE_ABOUT, L"О программе\tF1");
+        AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hFile, MF_STRING, ID_MENU_FILE_EXIT, L"Выйти\tCtrl+Q");
+        
+        AppendMenuW(hTheme, MF_STRING | MF_CHECKED, ID_MENU_THEME_SYSTEM, L"Системная\tCtrl+1");
+        AppendMenuW(hTheme, MF_STRING, ID_MENU_THEME_LIGHT, L"Светлая\tCtrl+2");
+        AppendMenuW(hTheme, MF_STRING, ID_MENU_THEME_DARK, L"Тёмная\tCtrl+3");
+        
+        AppendMenuW(hFont, MF_STRING | MF_CHECKED, ID_MENU_FONT_SEGOE, L"Segoe UI\tCtrl+4");
+        AppendMenuW(hFont, MF_STRING, ID_MENU_FONT_CONSOLAS, L"Consolas\tCtrl+5");
+        AppendMenuW(hFont, MF_STRING, ID_MENU_FONT_COURIER, L"Courier New\tCtrl+6");
+        
+        AppendMenuW(hFontSize, MF_STRING, ID_MENU_FONTSIZE_10, L"10\tCtrl+Shift+1");
+        AppendMenuW(hFontSize, MF_STRING | MF_CHECKED, ID_MENU_FONTSIZE_12, L"12\tCtrl+Shift+2");
+        AppendMenuW(hFontSize, MF_STRING, ID_MENU_FONTSIZE_14, L"14\tCtrl+Shift+3");
+        AppendMenuW(hFontSize, MF_STRING, ID_MENU_FONTSIZE_16, L"16\tCtrl+Shift+4");
+        
+        AppendMenuW(hSettings, MF_POPUP, (UINT_PTR)hTheme, L"Тема");
+        AppendMenuW(hSettings, MF_POPUP, (UINT_PTR)hFont, L"Шрифт");
+        AppendMenuW(hSettings, MF_POPUP, (UINT_PTR)hFontSize, L"Размер текста");
+        
+        AppendMenuW(hBar, MF_POPUP, (UINT_PTR)hFile, L"Файл");
+        AppendMenuW(hBar, MF_POPUP, (UINT_PTR)hSettings, L"Настройки");
+        
+        SetMenu(hwnd, hBar);
+    }
+    
+    void BuildAccelerators(HWND hwnd, HACCEL &hAccel) {
+        ACCEL acc[] = {
+            { FVIRTKEY, VK_F1, ID_MENU_FILE_ABOUT },
+            { FVIRTKEY | FCONTROL, 'Q', ID_MENU_FILE_EXIT },
+            { FVIRTKEY | FCONTROL, '1', ID_MENU_THEME_SYSTEM },
+            { FVIRTKEY | FCONTROL, '2', ID_MENU_THEME_LIGHT },
+            { FVIRTKEY | FCONTROL, '3', ID_MENU_THEME_DARK },
+            { FVIRTKEY | FCONTROL, '4', ID_MENU_FONT_SEGOE },
+            { FVIRTKEY | FCONTROL, '5', ID_MENU_FONT_CONSOLAS },
+            { FVIRTKEY | FCONTROL, '6', ID_MENU_FONT_COURIER },
+            { FVIRTKEY | FCONTROL | FSHIFT, '1', ID_MENU_FONTSIZE_10 },
+            { FVIRTKEY | FCONTROL | FSHIFT, '2', ID_MENU_FONTSIZE_12 },
+            { FVIRTKEY | FCONTROL | FSHIFT, '3', ID_MENU_FONTSIZE_14 },
+            { FVIRTKEY | FCONTROL | FSHIFT, '4', ID_MENU_FONTSIZE_16 },
+            { FVIRTKEY | FCONTROL, VK_OEM_MINUS, ID_CMD_FONTSIZE_DEC },
+            { FVIRTKEY | FCONTROL, VK_OEM_PLUS, ID_CMD_FONTSIZE_INC },
+            { FVIRTKEY | FALT, VK_LEFT, 100 },
+            { FVIRTKEY | FALT, VK_RIGHT, 101 }
+        };
+        hAccel = CreateAcceleratorTable(acc, sizeof(acc) / sizeof(acc[0]));
+    }
+    
+    void UpdateMenuChecks(HWND hwnd) {
+        HMENU hBar = GetMenu(hwnd);
+        if (!hBar) return;
+        HMENU hSettings = GetSubMenu(hBar, 1);
+        if (!hSettings) return;
+        HMENU hTheme = GetSubMenu(hSettings, 0);
+        HMENU hFont = GetSubMenu(hSettings, 1);
+        HMENU hFontSize = GetSubMenu(hSettings, 2);
+        
+        ThemeChoice theme = Settings::GetTheme();
+        UINT idTheme = (theme == ThemeChoice::System) ? ID_MENU_THEME_SYSTEM : 
+                       (theme == ThemeChoice::Light ? ID_MENU_THEME_LIGHT : ID_MENU_THEME_DARK);
+        if (hTheme) CheckMenuRadioItem(hTheme, ID_MENU_THEME_SYSTEM, ID_MENU_THEME_DARK, idTheme, MF_BYCOMMAND);
+        
+        std::wstring fontFace = Settings::GetFontFace();
+        UINT idFont = ID_MENU_FONT_SEGOE;
+        if (_wcsicmp(fontFace.c_str(), L"Consolas") == 0) idFont = ID_MENU_FONT_CONSOLAS;
+        else if (_wcsicmp(fontFace.c_str(), L"Courier New") == 0) idFont = ID_MENU_FONT_COURIER;
+        if (hFont) CheckMenuRadioItem(hFont, ID_MENU_FONT_SEGOE, ID_MENU_FONT_COURIER, idFont, MF_BYCOMMAND);
+        
+        int fontSize = Settings::GetFontSize();
+        UINT idSize = (fontSize == 10) ? ID_MENU_FONTSIZE_10 : (fontSize == 12) ? ID_MENU_FONTSIZE_12 : 
+                      (fontSize == 14) ? ID_MENU_FONTSIZE_14 : ID_MENU_FONTSIZE_16;
+        if (hFontSize) CheckMenuRadioItem(hFontSize, ID_MENU_FONTSIZE_10, ID_MENU_FONTSIZE_16, idSize, MF_BYCOMMAND);
+    }
+}
+
+// Navigation module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/filesystem.h"
+#include "../../include/settings.h"
+#include <windows.h>
+#include <commctrl.h>
+#include <shellapi.h>
+#include <algorithm>
+
+namespace UI {
+    void UpdateNavButtons(UIControls &controls, UIState &state) {
+        EnableWindow(controls.hBackBtn, state.historyIndex > 0);
+        EnableWindow(controls.hFwdBtn, state.historyIndex + 1 < (int)state.history.size());
+    }
+    
+    void NavigateTo(HWND hwnd, UIControls &controls, UIState &state, 
+                    const std::wstring &path, bool addToHistory) {
+        
+        if (addToHistory) {
+            if (state.historyIndex + 1 < (int)state.history.size()) {
+                state.history.erase(state.history.begin() + state.historyIndex + 1, state.history.end());
+            }
+            if (state.history.empty() || _wcsicmp(state.history.back().c_str(), path.c_str()) != 0) {
+                state.history.push_back(path);
+            }
+            state.historyIndex = (int)state.history.size() - 1;
+        }
+        
+        bool isNetworkPath = (path.length() >= 2 && path[0] == L'\\' && path[1] == L'\\');
+        
+        if (isNetworkPath) {
+            HTREEITEM root = TreeView_GetRoot(controls.hTreeBottom);
+            std::function<HTREEITEM(HTREEITEM, const std::wstring&)> searchTree = 
+                [&](HTREEITEM hItem, const std::wstring& searchPath) -> HTREEITEM {
+                    while (hItem) {
+                        TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem;
+                        TreeView_GetItem(controls.hTreeBottom, &tvi);
+                        Filesystem::NodeData *data = reinterpret_cast<Filesystem::NodeData*>(tvi.lParam);
+                        if (data && _wcsicmp(data->path.c_str(), searchPath.c_str()) == 0) {
+                            return hItem;
+                        }
+                        HTREEITEM child = TreeView_GetChild(controls.hTreeBottom, hItem);
+                        if (child) {
+                            HTREEITEM found = searchTree(child, searchPath);
+                            if (found) return found;
+                        }
+                        hItem = TreeView_GetNextSibling(controls.hTreeBottom, hItem);
+                    }
+                    return nullptr;
+                };
+            HTREEITEM target = searchTree(root, path);
+            if (target) {
+                state.suppressTreeSelChange = true;
+                TreeView_SelectItem(controls.hTreeBottom, target);
+                TreeView_EnsureVisible(controls.hTreeBottom, target);
+                state.suppressTreeSelChange = false;
+            }
+        } else {
+            HTREEITEM target = Filesystem::EnsurePathInTree(controls.hTree, path);
+            if (target) {
+                state.suppressTreeSelChange = true;
+                TreeView_SelectItem(controls.hTree, target);
+                TreeView_EnsureVisible(controls.hTree, target);
+                state.suppressTreeSelChange = false;
+            }
+        }
+        
+        state.currentPath = path;
+        state.listItems.clear();
+        
+        // Update path edit IMMEDIATELY before loading directory to keep it synchronized
+        if (controls.hPathEdit) {
+            SetWindowTextW(controls.hPathEdit, path.c_str());
+        }
+        
+        // Ensure list is in report mode with columns set up
+        HWND hHeader = ListView_GetHeader(controls.hList);
+        if (!IsReportMode(controls.hList)) {
+            SetListViewMode(controls.hList, LVS_REPORT);
+            DWORD ex = ListView_GetExtendedListViewStyle(controls.hList);
+            ex |= LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP;
+            ThemeChoice effective = Settings::GetTheme();
+            if (effective == ThemeChoice::System) {
+                effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+            }
+            if (effective != ThemeChoice::Dark) {
+                ex |= LVS_EX_GRIDLINES; // Only use system gridlines in light theme
+            }
+            ListView_SetExtendedListViewStyle(controls.hList, ex);
+        } else {
+            // Make sure columns exist - check header
+            if (hHeader && Header_GetItemCount(hHeader) == 0) {
+                SetListColumns(controls.hList);
+            }
+            AdjustReportColumns(controls.hList);
+        }
+        
+        // Ensure image list is set before populating
+        SHFILEINFOW sfi{};
+        HIMAGELIST hSmall = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        if (hSmall) {
+            ListView_SetImageList(controls.hList, hSmall, LVSIL_SMALL);
+        }
+        
+        Filesystem::PopulateListForDirectory(controls.hList, path, state.listItems, controls.hEmptyLabel);
+        
+        // Show/hide list view and header based on whether we have items
+        if (!state.listItems.empty()) {
+            ShowWindow(controls.hList, SW_SHOW);
+            if (hHeader) ShowWindow(hHeader, SW_SHOW);
+            if (controls.hEmptyLabel) {
+                ShowWindow(controls.hEmptyLabel, SW_HIDE);
+            }
+        } else {
+            // Hide list and header when showing empty message
+            if (hHeader) ShowWindow(hHeader, SW_HIDE);
+            ShowWindow(controls.hList, SW_HIDE);
+        }
+        
+        UpdateNavButtons(controls, state);
+        UpdateStatusBar(controls.hStatusBar, state.listItems);
+        
+        // Update WindowData with new state
+        UI::UpdateWindowData(hwnd, controls, state);
+    }
+}
+
+// Subclass procedures module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/settings.h"
+#include <windows.h>
+#include <commctrl.h>
+
+namespace UI {
+    LRESULT CALLBACK ListViewSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        HWND hParent = GetParent(hwnd);
+        if (!hParent) return DefWindowProc(hwnd, uMsg, wParam, lParam);
+        
+        ThemeChoice effective = Settings::GetTheme();
+        if (effective == ThemeChoice::System) {
+            effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+        }
+        
+        if (uMsg == WM_PAINT) {
+            HWND hEmptyLabel = GetEmptyLabel(hParent);
+            if (IsListViewEmpty(hParent) && hEmptyLabel && IsWindowVisible(hEmptyLabel)) {
+                WNDPROC oldProc = GetOldListProc(hParent);
+                if (!oldProc) return DefWindowProc(hwnd, uMsg, wParam, lParam);
+                
+                // Draw empty message
+                LRESULT result = CallWindowProcW(oldProc, hwnd, uMsg, wParam, lParam);
+                HDC hdc = GetDC(hwnd);
+                if (hdc) {
+                    RECT rc; GetClientRect(hwnd, &rc);
+                    COLORREF grayColor = RGB(128, 128, 128);
+                    if (effective == ThemeChoice::Dark) grayColor = RGB(160, 160, 160);
+                    COLORREF oldColor = SetTextColor(hdc, grayColor);
+                    int oldBkMode = SetBkMode(hdc, TRANSPARENT);
+                    HFONT oldFont = nullptr;
+                    HFONT hFont = Settings::GetFont();
+                    if (hFont) oldFont = (HFONT)SelectObject(hdc, hFont);
+                    wchar_t text[256];
+                    GetWindowTextW(hEmptyLabel, text, 256);
+                    if (wcslen(text) == 0) wcscpy(text, L"Здесь пусто");
+                    SIZE textSize;
+                    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &textSize);
+                    int x = (rc.right - rc.left - textSize.cx) / 2;
+                    int y = (rc.bottom - rc.top - textSize.cy) / 2;
+                    TextOutW(hdc, x, y, text, (int)wcslen(text));
+                    SetTextColor(hdc, oldColor);
+                    SetBkMode(hdc, oldBkMode);
+                    if (oldFont) SelectObject(hdc, oldFont);
+                    ReleaseDC(hwnd, hdc);
+                }
+                return result;
+            }
+        }
+        
+        WNDPROC oldProc = GetOldListProc(hParent);
+        if (!oldProc) return DefWindowProc(hwnd, uMsg, wParam, lParam);
+        return CallWindowProcW(oldProc, hwnd, uMsg, wParam, lParam);
+    }
+    
+    // Subclass procedure for border controls to handle dark theme borders
+    LRESULT CALLBACK BorderSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+        if (uMsg == WM_NCPAINT) {
+            ThemeChoice effective = Settings::GetTheme();
+            if (effective == ThemeChoice::System) {
+                effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+            }
+            if (effective == ThemeChoice::Dark) {
+                HDC hdc = GetWindowDC(hwnd);
+                if (hdc) {
+                    RECT rc;
+                    GetWindowRect(hwnd, &rc);
+                    OffsetRect(&rc, -rc.left, -rc.top);
+                    // Draw dark border (gray)
+                    COLORREF borderColor = RGB(80, 80, 80); // Gray border for dark theme
+                    HBRUSH hBorderBrush = CreateSolidBrush(borderColor);
+                    FrameRect(hdc, &rc, hBorderBrush);
+                    DeleteObject(hBorderBrush);
+                    ReleaseDC(hwnd, hdc);
+                    return 0;
+                }
+            }
+        }
+        if (uMsg == WM_THEMECHANGED || uMsg == WM_SYSCOLORCHANGE) {
+            // Invalidate to force redraw when theme changes
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+    }
+    
+    LRESULT CALLBACK HeaderSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        HWND hParent = GetParent(hwnd);
+        if (!hParent) return DefWindowProc(hwnd, uMsg, wParam, lParam);
+        
+        ThemeChoice effective = Settings::GetTheme();
+        if (effective == ThemeChoice::System) {
+            effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+        }
+        
+        COLORREF bgColor = Settings::GetBackgroundColor();
+        COLORREF textColor = Settings::GetTextColor();
+        HBRUSH hBgBrush = CreateSolidBrush(bgColor);
+        
+        if (uMsg == WM_ERASEBKGND) {
+            HDC hdc = (HDC)wParam;
+            RECT rc; GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, hBgBrush);
+            DeleteObject(hBgBrush);
+            return 1;
+        }
+        if (uMsg == WM_PAINT) {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (hdc) {
+                RECT rc; GetClientRect(hwnd, &rc);
+                // Fill background
+                FillRect(hdc, &rc, hBgBrush);
+                
+                if (effective == ThemeChoice::Dark) {
+                    // Draw header items manually for dark theme
+                    int itemCount = Header_GetItemCount(hwnd);
+                    int x = 0;
+                    for (int i = 0; i < itemCount; i++) {
+                        HDITEMW hdi{};
+                        wchar_t buf[256] = {0};
+                        hdi.mask = HDI_TEXT | HDI_WIDTH | HDI_FORMAT;
+                        hdi.pszText = buf;
+                        hdi.cchTextMax = 256;
+                        if (Header_GetItem(hwnd, i, &hdi)) {
+                            RECT itemRect = {x, 0, x + hdi.cxy, rc.bottom};
+                            // Draw separator line (gray)
+                            if (i < itemCount - 1) {
+                                HPEN hPen = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
+                                HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+                                MoveToEx(hdc, itemRect.right - 1, itemRect.top, nullptr);
+                                LineTo(hdc, itemRect.right - 1, itemRect.bottom);
+                                SelectObject(hdc, hOldPen);
+                                DeleteObject(hPen);
+                            }
+                            
+                            // Draw text
+                            SetTextColor(hdc, textColor);
+                            SetBkColor(hdc, bgColor);
+                            int oldBkMode = SetBkMode(hdc, TRANSPARENT);
+                            DrawTextW(hdc, buf, -1, &itemRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                            SetBkMode(hdc, oldBkMode);
+                            
+                            x += hdi.cxy;
+                        }
+                    }
+                } else {
+                    // Use default drawing for light theme
+                    WNDPROC oldProc = GetOldHeaderProc(hParent);
+                    if (oldProc) {
+                        CallWindowProcW(oldProc, hwnd, WM_PAINT, (WPARAM)hdc, 0);
+                    }
+                }
+                
+                EndPaint(hwnd, &ps);
+            }
+            DeleteObject(hBgBrush);
+            return 0;
+        }
+        DeleteObject(hBgBrush);
+        WNDPROC oldProc = GetOldHeaderProc(hParent);
+        if (!oldProc) return DefWindowProc(hwnd, uMsg, wParam, lParam);
+        return CallWindowProcW(oldProc, hwnd, uMsg, wParam, lParam);
+    }
+}
+
+// Theme and font application module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include "../../include/settings.h"
+#include <windows.h>
+#include <commctrl.h>
+#include <dwmapi.h>
+
+// Forward declaration
+extern LRESULT CALLBACK HeaderSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+
+namespace UI {
+    void ApplyThemeToControls(HWND hwnd, UIControls &controls) {
+        COLORREF bgColor = Settings::GetBackgroundColor();
+        COLORREF textColor = Settings::GetTextColor();
+        
+        if (controls.hTree) {
+            TreeView_SetBkColor(controls.hTree, bgColor);
+            TreeView_SetTextColor(controls.hTree, textColor);
+            InvalidateRect(controls.hTree, nullptr, TRUE);
+        }
+        if (controls.hTreeBottom) {
+            TreeView_SetBkColor(controls.hTreeBottom, bgColor);
+            TreeView_SetTextColor(controls.hTreeBottom, textColor);
+            InvalidateRect(controls.hTreeBottom, nullptr, TRUE);
+        }
+        if (controls.hSplitter) {
+            InvalidateRect(controls.hSplitter, nullptr, TRUE);
+        }
+        if (controls.hList) {
+            ThemeChoice effective = Settings::GetTheme();
+            if (effective == ThemeChoice::System) {
+                effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+            }
+            // For dark theme, use CLR_NONE to prevent background from overwriting items
+            if (effective == ThemeChoice::Dark) {
+                ListView_SetBkColor(controls.hList, CLR_NONE);
+                ListView_SetTextBkColor(controls.hList, CLR_NONE);
+            } else {
+                ListView_SetBkColor(controls.hList, bgColor);
+                ListView_SetTextBkColor(controls.hList, bgColor);
+            }
+            ListView_SetTextColor(controls.hList, textColor);
+            if (effective == ThemeChoice::Dark) {
+                HWND hHeader = ListView_GetHeader(controls.hList);
+                if (hHeader) {
+                    UI::SetHeaderProc(hwnd, hHeader, HeaderSubclassProc);
+                    InvalidateRect(hHeader, nullptr, TRUE);
+                }
+            }
+            InvalidateRect(controls.hList, nullptr, TRUE);
+        }
+        if (controls.hEmptyLabel) {
+            InvalidateRect(controls.hEmptyLabel, nullptr, TRUE);
+        }
+        
+        ThemeChoice effective = Settings::GetTheme();
+        if (effective == ThemeChoice::System) {
+            effective = Settings::QuerySystemAppsUseLightTheme() ? ThemeChoice::Light : ThemeChoice::Dark;
+        }
+        if (effective == ThemeChoice::Dark) {
+            BOOL darkMode = TRUE;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
+            // Invalidate buttons for dark theme
+            if (controls.hBackBtn) InvalidateRect(controls.hBackBtn, nullptr, TRUE);
+            if (controls.hFwdBtn) InvalidateRect(controls.hFwdBtn, nullptr, TRUE);
+            if (controls.hViewDetailsBtn) InvalidateRect(controls.hViewDetailsBtn, nullptr, TRUE);
+            if (controls.hViewLargeBtn) InvalidateRect(controls.hViewLargeBtn, nullptr, TRUE);
+            if (controls.hViewSmallBtn) InvalidateRect(controls.hViewSmallBtn, nullptr, TRUE);
+            if (controls.hGoBtn) InvalidateRect(controls.hGoBtn, nullptr, TRUE);
+            // Redraw menu bar
+            DrawMenuBar(hwnd);
+        } else {
+            BOOL lightMode = FALSE;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &lightMode, sizeof(lightMode));
+            DrawMenuBar(hwnd);
+        }
+        if (controls.hPathEdit) {
+            InvalidateRect(controls.hPathEdit, nullptr, TRUE);
+        }
+    }
+    
+    void ApplyFontToControls(HWND hwnd, UIControls &controls) {
+        Settings::RecreateFont();
+        HFONT hFont = Settings::GetFont();
+        if (!hFont) return;
+        
+        if (controls.hTree) SendMessageW(controls.hTree, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (controls.hTreeBottom) SendMessageW(controls.hTreeBottom, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (controls.hList) {
+            SendMessageW(controls.hList, WM_SETFONT, (WPARAM)hFont, TRUE);
+            UpdateListViewRowHeight(controls.hList);
+        }
+        if (controls.hBackBtn) SendMessageW(controls.hBackBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (controls.hFwdBtn) SendMessageW(controls.hFwdBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (controls.hEmptyLabel) SendMessageW(controls.hEmptyLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (controls.hPathEdit) SendMessageW(controls.hPathEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+        if (controls.hGoBtn) SendMessageW(controls.hGoBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+        
+        // Set font for menu bar
+        HMENU hMenu = GetMenu(hwnd);
+        if (hMenu && hFont) {
+            // Menu font is handled by system, but we can force redraw
+            NONCLIENTMETRICSW ncm = { sizeof(NONCLIENTMETRICSW) };
+            if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+                // Update system metrics would require SPI_SETNONCLIENTMETRICS which needs admin
+                // Instead, force menu redraw
+                DrawMenuBar(hwnd);
+            }
+        }
+        
+        // Relayout controls to match new font size
+        UIState* state = UI::GetWindowStateForLayout(hwnd);
+        if (state) {
+            LayoutChildren(hwnd, controls, *state);
+        }
+    }
+}
+
+// Window data management module
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+#include "../../include/ui.h"
+#include <windows.h>
+#include <mutex>
+
+// Window data structure to store UIControls and UIState
+struct WindowData {
+    UIControls controls;
+    UIState state;
+    std::mutex networkScanMutex;
 };
 
-export const fetchUpdateUser = async (userData) => {
-  const response = await httpClient.put('/auth/me', userData);
-  return response.data;
+// Store window data in GWLP_USERDATA
+namespace {
+    WindowData* GetWindowDataInternal(HWND hwnd) {
+        return reinterpret_cast<WindowData*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
 }
 
-export const fetchUsersList = async () => {
-  const response = await httpClient.get('/auth/getAllUsers');
-  return response.data;
+// Export functions for use in other modules
+void SetWindowDataInternal(HWND hwnd, WindowData* data) {
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
 }
 
-export const fetchUserInfoById = async (id) => {
-  const response = await httpClient.get(`/auth/getUser/${id}`);
-  return response.data;
+// Export GetWindowData for use in other modules
+WindowData* GetWindowData(HWND hwnd) {
+    return GetWindowDataInternal(hwnd);
+}
+
+namespace UI {
+    void SetWindowData(HWND hwnd, UIControls *controls, UIState *state) {
+        WindowData* existing = GetWindowData(hwnd);
+        if (existing) {
+            if (controls) existing->controls = *controls;
+            if (state) existing->state = *state;
+        } else {
+            WindowData* wndData = new WindowData;
+            if (controls) wndData->controls = *controls;
+            if (state) wndData->state = *state;
+            SetWindowDataInternal(hwnd, wndData);
+        }
+    }
+    
+    UIControls* GetWindowControls(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? &wndData->controls : nullptr;
+    }
+    
+    UIState* GetWindowState(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? &wndData->state : nullptr;
+    }
+    
+    // Helper functions to update WindowData from external modules
+    void UpdateWindowControls(HWND hwnd, const UIControls &controls) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->controls = controls;
+        }
+    }
+    
+    void UpdateWindowState(HWND hwnd, const UIState &state) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->state = state;
+        }
+    }
+    
+    void UpdateWindowData(HWND hwnd, const UIControls &controls, const UIState &state) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->controls = controls;
+            wndData->state = state;
+        }
+    }
+    
+    // Helper function to get state for layout
+    UIState* GetWindowStateForLayout(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? &wndData->state : nullptr;
+    }
+    
+    // Helper function to set header proc
+    void SetHeaderProc(HWND hwnd, HWND hHeader, WNDPROC proc) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData && hHeader && !wndData->state.oldHeaderProc) {
+            wndData->state.oldHeaderProc = (WNDPROC)SetWindowLongPtrW(hHeader, GWLP_WNDPROC, (LONG_PTR)proc);
+        }
+    }
+    
+    // Helper functions for subclass procedures
+    bool IsListViewEmpty(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (!wndData) return false;
+        return wndData->state.listItems.empty();
+    }
+    
+    HWND GetEmptyLabel(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? wndData->controls.hEmptyLabel : nullptr;
+    }
+    
+    WNDPROC GetOldListProc(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? wndData->state.oldListProc : nullptr;
+    }
+    
+    WNDPROC GetOldHeaderProc(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? wndData->state.oldHeaderProc : nullptr;
+    }
+    
+    // Helper functions for control initialization
+    WindowData* CreateWindowData() {
+        return new WindowData;
+    }
+    
+    void InitializeWindowData(WindowData* wndData, const UIControls &controls, const UIState &state) {
+        if (wndData) {
+            wndData->controls = controls;
+            wndData->state = state;
+        }
+    }
+    
+    HWND GetToolTip(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? wndData->controls.hToolTip : nullptr;
+    }
+    
+    void SetToolTip(HWND hwnd, HWND hToolTip) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->controls.hToolTip = hToolTip;
+        }
+    }
+    
+    void UpdateScannedDevices(HWND hwnd, const std::vector<std::wstring> &devices) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            std::lock_guard<std::mutex> lock(wndData->networkScanMutex);
+            wndData->state.scannedDevices = devices;
+        }
+    }
+    
+    std::mutex* GetNetworkScanMutex(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? &wndData->networkScanMutex : nullptr;
+    }
+    
+    std::vector<std::wstring>* GetScannedDevices(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? &wndData->state.scannedDevices : nullptr;
+    }
+    
+    // Helper functions for network scan state
+    HTREEITEM GetLoadingItem(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? wndData->state.loadingItem : nullptr;
+    }
+    
+    void SetLoadingItem(HWND hwnd, HTREEITEM item) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->state.loadingItem = item;
+        }
+    }
+    
+    bool GetNetworkScanInProgress(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        return wndData ? wndData->state.networkScanInProgress : false;
+    }
+    
+    void SetNetworkScanInProgress(HWND hwnd, bool inProgress) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->state.networkScanInProgress = inProgress;
+        }
+    }
+    
+    std::vector<std::wstring> GetScannedDevicesLocked(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (!wndData) return std::vector<std::wstring>();
+        std::lock_guard<std::mutex> lock(wndData->networkScanMutex);
+        return wndData->state.scannedDevices;
+    }
+    
+    void ClearScannedDevices(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            wndData->state.scannedDevices.clear();
+        }
+    }
+    
+    void DeleteWindowData(HWND hwnd) {
+        WindowData* wndData = GetWindowData(hwnd);
+        if (wndData) {
+            delete wndData;
+            SetWindowDataInternal(hwnd, nullptr);
+        }
+    }
 }
 \end{lstlisting}
 
-\textbf{Server settings}
+\textbf{Utils}
 \begin{lstlisting}[style=CodeListing]
-const app = express();
-app.use(bodyParser.json());
-app.use(cors({
-  origin: function(origin, callback) {
-    // Разрешаем доступ для localhost и IP-адресов в диапазоне 192.168.*
-    if (!origin || 
-        /^http:\/\/localhost(:\d+)?$/.test(origin) || 
-        /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin)) {
-      callback(null, true);  // Разрешаем запросы
-    } else {
-      callback(new Error('Not allowed by CORS'));  // Отказываем всем остальным
+#include "../../include/utils.h"
+#include <shlwapi.h>
+#include <algorithm>
+
+namespace Utils {
+    std::wstring JoinPath(const std::wstring &a, const std::wstring &b) {
+        if (a.empty()) return b;
+        if (a.back() == L'\\') return a + b;
+        return a + L"\\" + b;
     }
-  },
-  credentials: true
-}));
-\end{lstlisting}
-
-\textbf{Logstash.conf}
-\begin{lstlisting}[style=CodeListing]
-  input {
-  kafka {
-    bootstrap_servers => "kafka:9092"
-    topics => ["logs"]
-    group_id => "logstash"
-  }
-}
-
-filter {
-  json {
-    source => "message"
-  }
-
-  mutate {
-    add_field => {
-      "message" => "%{[message]}"
-      "service" => "%{[service]}"
-      "level" => "%{[level]}"
+    
+    std::wstring FileTimeToWString(const FILETIME &ft) {
+        SYSTEMTIME stUTC{}, stLocal{};
+        FileTimeToSystemTime(&ft, &stUTC);
+        SystemTimeToTzSpecificLocalTime(nullptr, &stUTC, &stLocal);
+        wchar_t buf[64];
+        swprintf(buf, 64, L"%04u-%02u-%02u %02u:%02u",
+                 stLocal.wYear, stLocal.wMonth, stLocal.wDay, stLocal.wHour, stLocal.wMinute);
+        return buf;
     }
-  }
-}
-
-output {
-  elasticsearch {
-    hosts => ["http://elasticsearch:9200"]
-    data_stream => "true"
-    data_stream_type => "logs"
-    data_stream_dataset => "all"
-    data_stream_namespace => "prod"
-  }
 }
 \end{lstlisting}
 
-\textbf{Docker-compose}
+\textbf{Main}
 \begin{lstlisting}[style=CodeListing]
-services:
-  logstash:
-    depends_on:
-      - elasticsearch
-      - kafka
-    container_name: logstash
-    image: docker.elastic.co/logstash/logstash:8.5.3
-    networks:
-      - app-net
-    environment:
-      - "LOGSTASH_HTTP_HOST=0.0.0.0"
-    ports:
-      - "5044:5044"
-    volumes:
-      - ./logstash/pipeline/logstash-prod.conf:/usr/share/logstash/pipeline/logstash.conf
+#ifdef _WIN32
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
 
-  elasticsearch:
-    container_name: elasticsearch
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.5.3
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - xpack.security.http.ssl.enabled=false
-      - ELASTIC_PASSWORD=admin
-    networks:
-      - app-net
-    ports:
-      - "9200:9200"
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
+// Winsock must be included before windows.h
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <commctrl.h>
+#include <shlwapi.h>
+#include <gdiplus.h>
+#include "include/ui.h"
+#include "include/config.h"
 
-  kibana:
-    container_name: kibana
-    image: docker.elastic.co/kibana/kibana:8.5.3
-    networks:
-      - app-net
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    ports:
-      - "5601:5601"
-    volumes:
-      - kibana_config:/usr/share/kibana/config
+#pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "mpr.lib")
+#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "shlwapi.lib")
 
-  zookeeper:
-    container_name: zookeeper
-    image: confluentinc/cp-zookeeper:latest
-    networks:
-      - app-net
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
+using namespace Gdiplus;
 
-  kafka:
-    container_name: kafka
-    depends_on:
-      - zookeeper
-    image: confluentinc/cp-kafka:latest
-    ports:
-      - "9092:9092"
-    networks:
-      - app-net
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+// Initialize Winsock
+struct WinsockInitializer {
+    WinsockInitializer() {
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+    }
+    ~WinsockInitializer() {
+        WSACleanup();
+    }
+} g_winsockInit;
 
-  gateway:
-    image: nginx:latest
-    container_name: gateway
-    ports:
-      - "80:80"
-    networks:
-      - app-net
-    volumes:
-      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf
-    depends_on:
-      - frontend
-      - auth-service
-      - tasks-service
-      - log-service
-
-  db:
-    image: postgres:14
-    container_name: postgres-db
-    restart: always
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
-    ports:
-      - "5432:5432"
-    networks:
-      - app-net
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-
-  log-service:
-    image: kostyabet228/crm-system:log_service-latest
-    container_name: log-service
-    networks:
-      - app-net
-    expose:
-      - "5002"
-    depends_on:
-      db:
-        condition: service_started
-      kafka:
-        condition: service_healthy
-    restart: on-failure
-    environment:
-      ACCESSTOKENSECRET: ${ACCESSTOKENSECRET}
-      REFRESHTOKENSECRET: ${REFRESHTOKENSECRET}
-      KAFKA_BROKER: kafka:9092
-
-  auth-service:
-    image: kostyabet228/crm-system:auth_service-latest
-    container_name: auth-service
-    networks:
-      - app-net
-    expose:
-      - "5000"
-    depends_on:
-      db:
-        condition: service_started
-      kafka:
-        condition: service_healthy
-    restart: on-failure
-    environment:
-      ACCESSTOKENSECRET: ${ACCESSTOKENSECRET}
-      REFRESHTOKENSECRET: ${REFRESHTOKENSECRET}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: ${DB_HOST}
-      DB_PORT: ${DB_PORT}
-      DB_NAME: ${DB_NAME}
-      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
-      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
-      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
-      KAFKA_BROKER: kafka:9092
-
-  tasks-service:
-    image: kostyabet228/crm-system:tasks_service-latest
-    container_name: tasks-service
-    networks:
-      - app-net
-    expose:
-      - "5001"
-    depends_on:
-      db:
-        condition: service_started
-      kafka:
-        condition: service_healthy
-    restart: on-failure
-    environment:
-      ACCESSTOKENSECRET: ${ACCESSTOKENSECRET}
-      REFRESHTOKENSECRET: ${REFRESHTOKENSECRET}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: ${DB_HOST}
-      DB_PORT: ${DB_PORT}
-      DB_NAME: ${DB_NAME}
-      GATEWAY_URL: http:/gateway:80
-      KAFKA_BROKER: kafka:9092
-
-  frontend:
-    image: kostyabet228/crm-system:frontend-latest
-    container_name: frontend
-    networks:
-      - app-net
-    ports:
-      - "3000:3000"
-    environment:
-      VITE_API_LOCAL: http:/gateway:80
-
-networks:
-  app-net:
-    driver: bridge
-
-volumes:
-  kibana_config:
-  es_data:
-  postgres-data: {}
-
-\end{lstlisting}
-
-\textbf{Nginx.conf}
-\begin{lstlisting}[style=CodeListing]
-events {}
-
-http {
-  upstream auth {
-    server auth-service:5000;
-  }
-
-  upstream tasks {
-    server tasks-service:5001;
-  }
-
-  upstream log {
-    server log-service:5002;
-  }
-
-  server {
-    listen 80;
-
-    location ~ ^/(tasks|tasks/|priority|priority/|state|state/) {
-      proxy_pass http://tasks;
-      proxy_redirect off;
-      proxy_set_header Host $host;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    // Initialize GDI+
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+    
+    const wchar_t CLASS_NAME[] = L"FileManagerWin";
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = UI::WindowProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = CLASS_NAME;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    
+    HICON hIcon = nullptr;
+    HICON hIconSmall = nullptr;
+    
+    // Try to load icon from resource first
+    hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_MAINICON), IMAGE_ICON, 
+                               GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+    hIconSmall = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_MAINICON), IMAGE_ICON,
+                                    GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    
+    if (!hIcon) {
+        hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MAINICON));
+        hIconSmall = hIcon;
+    }
+    
+    if (!hIcon) {
+        // Try to load icon from icon.png using GDI+
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(hInstance, exePath, MAX_PATH);
+        PathRemoveFileSpecW(exePath);
+        std::wstring iconPath = std::wstring(exePath) + L"\\icon.png";
+        
+        if (GetFileAttributesW(iconPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            iconPath = L"icon.png";
+        }
+        
+        if (GetFileAttributesW(iconPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            hIcon = UI::LoadIconFromPNG(iconPath.c_str(), gdiplusToken);
+            hIconSmall = hIcon;
+        }
+    }
+    
+    if (!hIcon) {
+        hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        hIconSmall = hIcon;
+    }
+    
+    wc.hIcon = hIcon;
+    wc.hIconSm = hIconSmall;
+    
+    if (!RegisterClassExW(&wc)) {
+        GdiplusShutdown(gdiplusToken);
+        return 1;
     }
 
-    location ~ ^/(auth|uploads/avatars)/ {
-      proxy_pass http://auth;
-      proxy_redirect off;
-      proxy_set_header Host $host;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
+    HWND hwnd = CreateWindowExW(0, CLASS_NAME, L"File Manager", WS_OVERLAPPEDWINDOW,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700,
+                                nullptr, nullptr, hInstance, nullptr);
+    if (!hwnd) {
+        GdiplusShutdown(gdiplusToken);
+        return 1;
     }
+    
+    // Set window icon
+    if (hIcon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        SetClassLongPtrW(hwnd, GCLP_HICON, (LONG_PTR)hIcon);
+        SetClassLongPtrW(hwnd, GCLP_HICONSM, (LONG_PTR)hIconSmall);
+    }
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
 
-    location ~ ^/(log|log/) {
-      proxy_pass http://log;
-      proxy_redirect off;
-      proxy_set_header Host $host;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
+    MSG msg{};
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        // Get accelerator table from window data (may not be available immediately)
+        UIControls* controls = UI::GetWindowControls(hwnd);
+        HACCEL hAccel = controls ? controls->hAccel : nullptr;
+        
+        if (!hAccel || !TranslateAccelerator(hwnd, hAccel, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
-  }
+    
+    // Cleanup
+    if (hIcon) DestroyIcon(hIcon);
+    GdiplusShutdown(gdiplusToken);
+    
+    return (int)msg.wParam;
 }
+
+#else
+// Linux/ncurses version - keep existing code
+#include <ncurses.h>
+// ... existing ncurses code ...
+#endif
 \end{lstlisting}

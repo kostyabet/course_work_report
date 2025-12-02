@@ -1,0 +1,37 @@
+\subsection{Ошибка компиляции из-за отсутствующего заголовочного файла}
+
+При добавлении функции \texttt{GetNetworkScanMutex()} в заголовочный файл \texttt{ui.h}
+возникла ошибка компиляции в нескольких модулях. Функция возвращала
+ссылку на \texttt{std::mutex}, но заголовочный файл \texttt{<mutex>} не был включён в
+\texttt{ui.h}, что приводило к ошибке компиляции во всех модулях, которые включали
+\texttt{ui.h}.
+
+Информацию об ошибке можно рассмотреть ниже.
+
+\begin{lstlisting}[style=CodeListing]
+//psf/Home/Documents/university/5_term/CurseWork/file-manager/src/ui/layout.cpp: In function 'void UI::LayoutChildren(HWND, const UIControls&, const UIState&)':
+//psf/Home/Documents/university/5_term/CurseWork/file-manager/src/ui/layout.cpp:23:15: error: 'mutex' in namespace 'std' does not name a type
+   23 |         std::mutex& mtx = UI::GetNetworkScanMutex(hwnd);
+      |               ^~~~~
+In file included from //psf/Home/Documents/university/5_term/CurseWork/file-manager/src/ui/layout.cpp:10:
+//psf/Home/Documents/university/5_term/CurseWork/file-manager/include/ui.h:50:8: note: 'std::mutex' has not been declared
+   50 |     std::mutex& GetNetworkScanMutex(HWND hwnd);
+      |        ^~~~~
+\end{lstlisting}
+
+Проблема была решена добавлением директивы \texttt{\#include <mutex>} в начало файла \texttt{ui.h}.
+Это обеспечило объявление типа \texttt{std::mutex} во всех модулях, которые включают
+заголовочный файл \texttt{ui.h}.
+
+\begin{lstlisting}[style=CodeListing]
+#include <mutex>
+
+namespace UI {
+    std::mutex& GetNetworkScanMutex(HWND hwnd);
+}
+\end{lstlisting}
+
+После добавления \texttt{\#include <mutex>} все ошибки компиляции были устранены. Все модули
+успешно компилируются, и функция \texttt{GetNetworkScanMutex()} корректно работает во всех местах
+использования. Это подтвердило важность включения всех необходимых заголовочных файлов в
+заголовочные файлы, которые используются другими модулями.

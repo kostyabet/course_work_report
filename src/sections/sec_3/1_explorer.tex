@@ -1,0 +1,178 @@
+\subsection{Работа программного средства}
+
+К основному функционалу программного средства можно отнести
+следующие компоненты:
+
+\begin{itemize}
+    \item получение списка директорий;
+    \item получение списка файлов в директории;
+    \item открытие файла;
+\end{itemize}
+
+\subsubsection{Получение списка директорий}
+
+Получение списка директорий начинается с проверки наличия
+placeholder-элементов в узле дерева
+каталогов и их удаления.
+
+После удаления placeholder-элементов функция проверяет
+данные узла на существование и проверяет, был ли узел
+уже расширен ранее, чтобы избежать повторной загрузки
+подкаталогов.
+
+Если узел ещё не расширен, формируется паттерн поиска
+для директории и открывается поиск файлов через функцию
+FindFirstFileW. При успешном открытии поиска выполняется
+перебор всех найденных элементов: пропускаются файлы,
+пропускаются системные директории, для каждой найденной
+директории проверяется наличие подкаталогов и элемент
+добавляется в дерево с соответствующей пометкой о наличии
+дочерних элементов.
+
+\begin{lstlisting}[style=CodeListing]
+void ExpandTreeItem(HWND hTree, HTREEITEM hItem) {
+    // Remove placeholder children
+    HTREEITEM hChild = TreeView_GetChild(hTree, hItem);
+    while (hChild) {
+        TVITEMW tvi{}; tvi.mask = TVIF_TEXT; tvi.hItem = hChild;
+        wchar_t buf[8]; tvi.pszText = buf; tvi.cchTextMax = 8;
+        TreeView_GetItem(hTree, &tvi);
+        if (wcscmp(buf, L"...") == 0) {
+            TreeView_DeleteItem(hTree, hChild);
+            break;
+        }
+        hChild = TreeView_GetNextSibling(hTree, hChild);
+    }
+
+    TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem; 
+    TreeView_GetItem(hTree, &tvi);
+    NodeData *data = reinterpret_cast<NodeData*>(tvi.lParam);
+    if (!data || data->expanded) return;
+
+    std::wstring pattern = Utils::JoinPath(data->path, L"*");
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+        std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        std::wstring full = Utils::JoinPath(data->path, name);
+        bool hasChildren = HasSubdirs(full);
+        InsertTreeItem(hTree, hItem, name, full, hasChildren);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    data->expanded = true;
+}
+\end{lstlisting}
+
+После завершения перебора поиск закрывается, и узел
+помечается как расширенный, чтобы предотвратить повторную
+загрузку при следующем раскрытии.
+
+Если в процессе работы алгоритма произошла ошибка, функция
+завершается без добавления элементов, и узел остаётся в
+исходном состоянии.
+
+\subsubsection{Получение списка файлов в директории}
+
+Получение списка файлов в директории начинается с очистки
+списка интерфейса и вектора элементов. Далее выполняется
+нормализация пути директории для разрешения символических
+ссылок и коротких путей.
+
+После нормализации пути проверяется существование директории
+через GetFileAttributesW. Если путь не существует,
+отображается соответствующее сообщение об ошибке, и функция
+завершается.
+
+Если путь существует, проверяется, что это действительно
+директория, а не файл. Если переданный путь указывает на
+файл, отображается сообщение "Файл пуст", и функция
+завершается.
+
+\begin{lstlisting}[style=CodeListing]
+int idx = 0;
+do {
+    std::wstring name = fd.cFileName;
+    if (name == L"." || name == L"..") continue;
+    bool isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+    ListItem ri{ name, Utils::JoinPath(normalizedPath, name), isDir };
+    items.push_back(ri);
+
+    LVITEMW item{};
+    SHFILEINFOW sfi{};
+    UINT attrs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+    SHGetFileInfoW(ri.fullPath.c_str(), attrs, &sfi, sizeof(sfi), 
+                  SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES | SHGFI_SMALLICON);
+
+    item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+    item.iItem = idx;
+    item.pszText = const_cast<wchar_t*>(name.c_str());
+    item.lParam = static_cast<LPARAM>(idx);
+    item.iImage = sfi.iIcon;
+    ListView_InsertItem(hList, &item);
+
+    std::wstring typeText = isDir ? L"Dir" : L"File";
+    ListView_SetItemText(hList, idx, 1, const_cast<wchar_t*>(typeText.c_str()));
+
+    std::wstring mod = Utils::FileTimeToWString(fd.ftLastWriteTime);
+    ListView_SetItemText(hList, idx, 2, const_cast<wchar_t*>(mod.c_str()));
+    ++idx;
+} while (FindNextFileW(h, &fd));
+FindClose(h);
+\end{lstlisting}
+
+Для директории формируется паттерн поиска и открывается
+поиск файлов. При успешном открытии выполняется перебор
+всех найденных элементов: пропускаются системные директории,
+для каждого элемента определяется его тип, создаётся объект
+элемента списка, получается системная иконка, и элемент
+добавляется в список интерфейса с установкой текста колонок
+"Type" и "Modified".
+
+После завершения перебора поиск закрывается, и список файлов
+отображается пользователю.
+
+\subsubsection{Открытие файла}
+
+Открытие файла начинается с обработки события двойного клика
+пользователя по элементу списка. Функция получает индекс
+выбранного элемента и проверяет его корректность.
+
+После получения индекса функция извлекает соответствующий
+элемент из списка элементов директории и проверяет его тип.
+Если выбранный элемент является директорией, выполняется
+переход в эту директорию через функцию NavigateTo.
+
+\begin{lstlisting}[style=CodeListing]
+int idx = act->iItem;
+if (idx >= 0 && idx < (int)state->listItems.size()) {
+    const Filesystem::ListItem &ri = state->listItems[idx];
+    if (ri.isDir) {
+        NavigateTo(hwnd, *controls, *state, ri.fullPath, true);
+    } else {
+        HINSTANCE h = ShellExecuteW(hwnd, L"open", ri.fullPath.c_str(), 
+                                   nullptr, nullptr, SW_SHOWNORMAL);
+        if ((INT_PTR)h <= 32) {
+            MessageBoxW(hwnd, L"Не удалось открыть файл", L"Ошибка", 
+                       MB_ICONERROR | MB_OK);
+        }
+    }
+}
+\end{lstlisting}
+
+Если выбранный элемент является файлом, выполняется попытка
+открыть файл через функцию ShellExecuteW с параметром "open",
+который передаёт управление файлом операционной системе для
+выбора соответствующего приложения.
+
+При успешном открытии файла функция ShellExecuteW возвращает
+значение больше 32. Если возвращаемое значение меньше или
+равно 32, это означает ошибку открытия файла, и пользователю
+отображается сообщение об ошибке "Не удалось открыть файл".
+
+Если файл успешно открыт, операционная система запускает
+соответствующее приложение для работы с файлом, и
+пользователь может работать с содержимым файла.

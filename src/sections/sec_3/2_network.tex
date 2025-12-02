@@ -1,0 +1,188 @@
+\subsection{Работа с сетевыми устройствами}
+
+К функционалу работы с сетевыми устройствами можно отнести следующие компоненты:
+
+\begin{itemize}
+    \item поиск сетевых устройств;
+    \item получение списка сетевых шаров;
+    \item поиск файлов и шаров на сетевых устройствах;
+\end{itemize}
+
+\subsubsection{Поиск сетевых устройств}
+
+Поиск сетевых устройств начинается с инициализации множества для хранения уникальных устройств и вектора для результата.
+
+Алгоритм использует несколько методов для максимально полного обнаружения сетевых устройств. Первый метод -- получение сетевых дисков, сопоставленных буквам (Z:, Y: и т.д.), которые добавляются в множество устройств.
+
+\begin{lstlisting}[style=CodeListing]
+std::vector<std::wstring> networkDrives = EnumerateNetworkDrives();
+for (const auto& dev : networkDrives) {
+    if (!dev.empty()) {
+        devicesSet.insert(dev);
+    }
+}
+\end{lstlisting}
+
+Второй метод -- рекурсивное перечисление всех сетевых ресурсов, начиная с корня сети, что позволяет найти сетевые компьютеры и шары аналогично представлению "Сеть" в проводнике Windows.
+
+\begin{lstlisting}[style=CodeListing]
+NETRESOURCEW* pNetResource = nullptr;
+EnumerateNetworkResourcesRecursive(pNetResource, devicesSet, 0);
+\end{lstlisting}
+
+Третий метод -- перечисление рабочих групп и доменов с их серверами через установку типа отображения RESOURCEDISPLAYTYPE\_DOMAIN.
+
+\begin{lstlisting}[style=CodeListing]
+NETRESOURCEW nr{};
+nr.dwScope = RESOURCE_GLOBALNET;
+nr.dwType = RESOURCETYPE_ANY;
+nr.dwUsage = RESOURCEUSAGE_CONTAINER;
+nr.dwDisplayType = RESOURCEDISPLAYTYPE_DOMAIN;
+EnumerateNetworkResourcesRecursive(&nr, devicesSet, 0);
+\end{lstlisting}
+
+Четвёртый метод -- прямое перечисление серверов через установку типа отображения RESOURCEDISPLAYTYPE\_SERVER.
+
+\begin{lstlisting}[style=CodeListing]
+nr.dwScope = RESOURCE_GLOBALNET;
+nr.dwType = RESOURCETYPE_ANY;
+nr.dwUsage = RESOURCEUSAGE_ALL;
+nr.dwDisplayType = RESOURCEDISPLAYTYPE_SERVER;
+EnumerateNetworkResourcesRecursive(&nr, devicesSet, 0);
+\end{lstlisting}
+
+Пятый метод -- перечисление всех дисковых шаров через установку типа ресурса RESOURCETYPE\_DISK.
+
+\begin{lstlisting}[style=CodeListing]
+nr.dwScope = RESOURCE_GLOBALNET;
+nr.dwType = RESOURCETYPE_DISK;
+nr.dwUsage = RESOURCEUSAGE_ALL;
+nr.dwDisplayType = RESOURCEDISPLAYTYPE_GENERIC;
+EnumerateNetworkResourcesRecursive(&nr, devicesSet, 0);
+\end{lstlisting}
+
+Шестой метод -- перечисление из корня сетевого окружения с использованием флагов RESOURCEUSAGE\_CONTAINER и RESOURCEUSAGE\_CONNECTABLE. При успешном открытии перечисления выполняется перебор всех найденных ресурсов: проверяется формат имени, извлекаются имена серверов и добавляются в множество устройств, для контейнеров выполняется рекурсивное перечисление.
+
+\begin{lstlisting}[style=CodeListing]
+HANDLE hEnum = nullptr;
+if (WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_ANY, 
+                  RESOURCEUSAGE_CONTAINER | RESOURCEUSAGE_CONNECTABLE,
+                  nullptr, &hEnum) == NO_ERROR && hEnum) {
+    NETRESOURCEW* pBuffer = (NETRESOURCEW*)malloc(16384);
+    DWORD count = 0xFFFFFFFF;
+    while (WNetEnumResourceW(hEnum, &count, pBuffer, nullptr) == NO_ERROR && count > 0) {
+        for (DWORD i = 0; i < count; i++) {
+            if (pBuffer[i].lpRemoteName) {
+                std::wstring name = pBuffer[i].lpRemoteName;
+                if (name.length() >= 2 && name[0] == L'\\' && name[1] == L'\\' &&
+                    name.find(L'\\', 2) == std::wstring::npos) {
+                    devicesSet.insert(name);
+                }
+                if (pBuffer[i].dwUsage & RESOURCEUSAGE_CONTAINER) {
+                    EnumerateNetworkResourcesRecursive(&pBuffer[i], devicesSet, 0);
+                }
+            }
+        }
+        count = 0xFFFFFFFF;
+    }
+    free(pBuffer);
+    WNetCloseEnum(hEnum);
+}
+\end{lstlisting}
+
+Седьмой метод -- добавление устройств из ARP-таблицы \cite{iphlpapiDOC}, что помогает найти устройства, которые могут отсутствовать в сетевом перечислении.
+
+\begin{lstlisting}[style=CodeListing]
+std::vector<std::wstring> arpDevices = GetNetworkIPsFromARP();
+for (const auto& dev : arpDevices) {
+    if (!dev.empty()) {
+        devicesSet.insert(dev);
+    }
+}
+\end{lstlisting}
+
+После применения всех методов множество устройств преобразуется в вектор и возвращается как результат. Если в процессе работы алгоритма произошла ошибка (например, сетевые ресурсы недоступны или доступ запрещён), функция продолжает работу с другими методами, обеспечивая максимально полный список устройств.
+
+\subsubsection{Получение списка сетевых шаров}
+
+Получение списка сетевых шаров на сервере начинается с инициализации вектора для хранения шаров и создания структуры NETRESOURCEW с параметрами для поиска дисковых ресурсов.
+
+Структура NETRESOURCEW настраивается для поиска подключаемых дисковых ресурсов (RESOURCETYPE\_DISK, RESOURCEUSAGE\_CONNECTABLE) на указанном сетевом сервере.
+
+После настройки структуры открывается перечисление сетевых ресурсов через функцию WNetOpenEnumW с указанием пути к серверу. При успешном открытии перечисления выделяется буфер для хранения найденных ресурсов.
+
+\begin{lstlisting}[style=CodeListing]
+std::vector<std::wstring> EnumerateNetworkShares(const std::wstring& serverPath) {
+    std::vector<std::wstring> shares;
+    NETRESOURCEW nr{};
+    nr.dwScope = RESOURCE_GLOBALNET;
+    nr.dwType = RESOURCETYPE_DISK;
+    nr.dwUsage = RESOURCEUSAGE_CONNECTABLE;
+    nr.lpRemoteName = const_cast<wchar_t*>(serverPath.c_str());
+    
+    HANDLE hEnum = nullptr;
+    if (WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_DISK, 0, &nr, &hEnum) == NO_ERROR && hEnum) {
+        NETRESOURCEW* pBuffer = (NETRESOURCEW*)malloc(16384);
+        DWORD count = 0xFFFFFFFF;
+        while (WNetEnumResourceW(hEnum, &count, pBuffer, nullptr) == NO_ERROR && count > 0) {
+            for (DWORD i = 0; i < count; ++i) {
+                if (pBuffer[i].lpRemoteName) {
+                    shares.push_back(pBuffer[i].lpRemoteName);
+                }
+            }
+            count = 0xFFFFFFFF;
+        }
+        free(pBuffer);
+        WNetCloseEnum(hEnum);
+    }
+    return shares;
+}
+\end{lstlisting}
+
+Выполняется цикл перечисления ресурсов: вызывается функция WNetEnumResourceW для получения списка ресурсов, при успешном выполнении выполняется перебор всех найденных ресурсов, и имена удалённых ресурсов (lpRemoteName) добавляются в вектор шаров.
+
+Цикл продолжается до тех пор, пока не будет получен код ошибки ERROR\_NO\_MORE\_ITEMS, что означает, что все ресурсы перечислены.
+
+После завершения перечисления буфер освобождается, перечисление закрывается через WNetCloseEnum, и вектор шаров возвращается как результат.
+
+Если в процессе работы алгоритма произошла ошибка (например, сервер недоступен, доступ запрещён или перечисление не удалось открыть), функция возвращает пустой вектор шаров.
+
+\subsubsection{Поиск файлов и шаров на сетевых устройствах}
+
+Поиск файлов и шаров на сетевых устройствах начинается с удаления placeholder-элементов из узла сетевого устройства в дереве каталогов.
+
+После удаления placeholder-элементов функция проверяет данные узла на существование и проверяет, был ли узел уже расширен ранее, чтобы избежать повторной загрузки сетевых ресурсов.
+
+Если узел ещё не расширен, проверяется формат сетевого пути. В этом случае вызывается функция EnumerateNetworkShares для получения списка всех доступных шаров на этом сервере.
+
+\begin{lstlisting}[style=CodeListing]
+void ExpandNetworkDevice(HWND hTree, HTREEITEM hItem) {
+    TVITEMW tvi{}; tvi.mask = TVIF_PARAM; tvi.hItem = hItem; 
+    TreeView_GetItem(hTree, &tvi);
+    Filesystem::NodeData *data = reinterpret_cast<Filesystem::NodeData*>(tvi.lParam);
+    if (!data || data->expanded) return;
+    
+    if (data->path.length() >= 2 && data->path[0] == L'\\' && 
+        data->path[1] == L'\\' && data->path.find(L'\\', 2) == std::wstring::npos) {
+        std::vector<std::wstring> shares = EnumerateNetworkShares(data->path);
+        for (const auto& share : shares) {
+            size_t lastSlash = share.find_last_of(L'\\');
+            std::wstring displayName = (lastSlash != std::wstring::npos) ? 
+                share.substr(lastSlash + 1) : share;
+            bool hasChildren = Filesystem::HasSubdirs(share);
+            Filesystem::InsertTreeItem(hTree, hItem, displayName, share, hasChildren);
+        }
+        data->expanded = true;
+    } else {
+        Filesystem::ExpandTreeItem(hTree, hItem);
+    }
+}
+\end{lstlisting}
+
+Для каждого найденного шара извлекается отображаемое имя (последний сегмент пути после последней обратной косой черты), проверяется наличие подкаталогов в шаре, и шар добавляется в дерево с соответствующей пометкой о наличии дочерних элементов.
+
+Если путь содержит третью обратную косую черту, это означает, что путь указывает на конкретную шару или подкаталог, и для его обработки вызывается стандартный алгоритм расширения локального узла дерева через функцию ExpandTreeItem.
+
+После завершения обработки узел помечается как расширенный, чтобы предотвратить повторную загрузку при следующем раскрытии.
+
+Если в процессе работы алгоритма произошла ошибка (например, сетевой сервер недоступен, доступ запрещён или шары не найдены), функция завершается без добавления элементов, и узел остаётся в исходном состоянии.
